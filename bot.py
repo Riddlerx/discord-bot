@@ -51,4 +51,9 @@ async def coin(ctx):
     result = random.choice(["Heads", "Tails"])
     await ctx.send(f"🪙 {ctx.author.mention} flipped **{result}**!")
 
-bot.run(os.getenv("DISCORD_BOT_TOKEN"))
+token = os.getenv("DISCORD_BOT_TOKEN")
+
+if not token:
+    raise Exception("DISCORD_BOT_TOKEN not set!")
+
+bot.run(token)
