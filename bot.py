@@ -2,6 +2,10 @@ import os
 import random
 import discord
 from discord.ext import commands
+from dotenv import load_dotenv  # new
+
+# Load environment variables from .env (works on both Windows and Linux)
+load_dotenv()
 
 # intents
 intents = discord.Intents.default()
@@ -27,7 +31,6 @@ async def on_ready():
 
 @bot.event
 async def on_member_join(member):
-
     # give role
     role = discord.utils.get(member.guild.roles, name=ROLE_NAME)
     if role:
@@ -51,6 +54,7 @@ async def coin(ctx):
     result = random.choice(["Heads", "Tails"])
     await ctx.send(f"🪙 {ctx.author.mention} flipped **{result}**!")
 
+# Load token from .env
 token = os.getenv("DISCORD_BOT_TOKEN")
 
 if not token:
