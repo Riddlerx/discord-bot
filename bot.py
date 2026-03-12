@@ -2,10 +2,6 @@ import os
 import random
 import discord
 from discord.ext import commands
-from dotenv import load_dotenv  # new
-
-# Load environment variables from .env (works on both Windows and Linux)
-load_dotenv()
 
 # intents
 intents = discord.Intents.default()
@@ -54,10 +50,10 @@ async def coin(ctx):
     result = random.choice(["Heads", "Tails"])
     await ctx.send(f"🪙 {ctx.author.mention} flipped **{result}**!")
 
-# Load token from .env
+# Load token from environment variable (works on Render, Windows, Linux)
 token = os.getenv("DISCORD_BOT_TOKEN")
 
 if not token:
-    raise Exception("DISCORD_BOT_TOKEN not set!")
+    raise Exception("DISCORD_BOT_TOKEN not set! Please set the environment variable.")
 
 bot.run(token)
