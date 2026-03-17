@@ -101,6 +101,7 @@ def get_access_token():
     return data.get("access_token")
 
 def search_items(token, item_name):
+    """Search items by name and auto-select main item (ignore recipes, teas, etc.)"""
     url = "https://us.api.blizzard.com/data/wow/search/item"
     headers = {"Authorization": f"Bearer {token}"}
     params = {
@@ -111,15 +112,29 @@ def search_items(token, item_name):
     response = requests.get(url, headers=headers, params=params)
     data = response.json()
     results = data.get("results", [])
-    items = []
-    for r in results[:5]:
+
+    if not results:
+        return None  # no items found
+
+    # Filter: only include items with exact name match, ignore recipes and teas
+    filtered = []
+    for r in results:
         item = r["data"]
-        items.append({
-            "id": item["id"],
-            "name": item["name"]["en_US"],
-            "level": item.get("level", "N/A")
-        })
-    return items
+        name = item["name"]["en_US"].lower()
+        if name == item_name.lower():
+            filtered.append({
+                "id": item["id"],
+                "name": item["name"]["en_US"],
+                "level": item.get("level", "N/A")
+            })
+
+    if not filtered:
+        # fallback: pick the first item anyway
+        item = results[0]["data"]
+        return {"id": item["id"], "name": item["name"]["en_US"], "level": item.get("level", "N/A")}
+
+    # return the first exact match
+    return filtered[0]
 
 @bot.command()
 async def price(ctx, item: str, realm: str = None):
@@ -131,36 +146,13 @@ async def price(ctx, item: str, realm: str = None):
             await ctx.send("⚠️ Failed to get API token.")
             return
 
-        # 🔹 Step 1: Search for item (handles multiple items with same name)
-        items = search_items(token, item)
-
-        if not items:
+        # 🔹 Step 1: Search for item (auto-select main item)
+        item_data = search_items(token, item)
+        if not item_data:
             await ctx.send("❌ Item not found.")
             return
 
-        # If multiple items, ask user to choose
-        if len(items) > 1:
-            msg = "⚠️ Multiple items found:\n"
-            for i, it in enumerate(items):
-                msg += f"{i+1}. {it['name']} (ilvl {it['level']})\n"
-            msg += "\nReply with a number (1-5) to choose."
-            await ctx.send(msg)
-
-            def check(m):
-                return m.author == ctx.author and m.channel == ctx.channel
-
-            try:
-                reply = await bot.wait_for("message", timeout=20.0, check=check)
-                choice = int(reply.content) - 1
-                if choice < 0 or choice >= len(items):
-                    await ctx.send("❌ Invalid choice.")
-                    return
-                item_id = items[choice]["id"]
-            except:
-                await ctx.send("⏳ Timed out or invalid input.")
-                return
-        else:
-            item_id = items[0]["id"]
+        item_id = item_data["id"]
 
         # 🔹 Step 2: Get prices
         prices = []
@@ -205,7 +197,7 @@ async def price(ctx, item: str, realm: str = None):
 
         # 🔹 Step 4: Embed output
         embed = discord.Embed(
-            title=f"💰 {item.title()}",
+            title=f"💰 {item_data['name']}",
             description="Auction House Data",
             color=discord.Color.green()
         )
