@@ -118,7 +118,22 @@ async def get_access_token(session: aiohttp.ClientSession) -> Optional[str]:
         print(f"❌ Failed to get Blizzard access token: {e}")
     return None
 
-async def get_guild_roster(session: aiohttp.ClientSession, realm: str, guild: str) -> List[Dict]:
+async def get_item_by_id(session: aiohttp.ClientSession, item_id: int) -> Optional[Dict]:
+    """Fetch item details directly from Blizzard API using item ID."""
+    token = await get_access_token(session)
+    if not token: return None
+
+    url = f"https://us.api.blizzard.com/data/wow/item/{item_id}"
+    headers = {"Authorization": f"Bearer {token}"}
+    params = {"namespace": "static-us", "locale": "en_US"}
+    
+    data = await safe_get(session, url, headers=headers, params=params)
+    if data:
+        # Blizzard API returns item name as 'name' directly for this endpoint
+        return {"id": data["id"], "name": data["name"]}
+    return None
+
+
     """Fetch guild roster from Blizzard API."""
     token = await get_access_token(session)
     if not token:
@@ -319,6 +334,7 @@ async def search_items(session: aiohttp.ClientSession, item_name: str) -> Option
     token = await get_access_token(session)
     if not token: return None
 
+    # First, try to find an exact match using the search endpoint
     url = "https://us.api.blizzard.com/data/wow/search/item"
     headers = {"Authorization": f"Bearer {token}"}
     params = {
@@ -329,17 +345,20 @@ async def search_items(session: aiohttp.ClientSession, item_name: str) -> Option
     }
     
     data = await safe_get(session, url, headers=headers, params=params)
-    if not data: return None
-
-    results = data.get("results", [])
-    for r in results:
-        item = r["data"]
-        if item["name"]["en_US"].lower() == item_name.lower():
-            return {"id": item["id"], "name": item["name"]["en_US"]}
+    if data:
+        results = data.get("results", [])
+        for r in results:
+            item = r["data"]
+            if item.get("name", {}).get("en_US", "").lower() == item_name.lower():
+                return {"id": item["id"], "name": item["name"]["en_US"]}
     
-    if results:
-        item = results[0]["data"]
-        return {"id": item["id"], "name": item["name"]["en_US"]}
+    # If not found by name search, try by ID if input is an integer
+    try:
+        item_id = int(item_name)
+        return await get_item_by_id(session, item_id)
+    except ValueError:
+        pass # Not an integer, continue
+
     return None
 
 @bot.event
