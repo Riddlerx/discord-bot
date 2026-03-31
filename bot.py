@@ -275,6 +275,10 @@ async def build_guild_vault(session: aiohttp.ClientSession) -> str:
     if token_price > 0:
         table.append(f"💰 WoW Token Price: {token_price:,.0f}g")
 
+    # Add Last Updated timestamp
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    table.append(f"\nLast Updated: {now} (UTC)")
+
     return "```" + "\n".join(table) + "```"
 
 async def get_wow_token_price(session: aiohttp.ClientSession) -> float:
