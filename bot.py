@@ -7,6 +7,7 @@ import asyncio
 import aiohttp
 import time
 from typing import Optional, Dict, Any, List
+import urllib.parse
 
 # Load environment variables
 load_dotenv()
@@ -45,6 +46,7 @@ blizzard_token: Optional[str] = None
 blizzard_token_expiry: float = 0
 commodities_cache: Optional[Dict] = None
 commodities_cache_time: float = 0
+raider_semaphore = asyncio.Semaphore(5) # Lower concurrency to be gentler
 
 STATE_FILE = "bot_state.json"
 
@@ -78,18 +80,28 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# ... (rest of global state)
+
 async def safe_get(session: aiohttp.ClientSession, url: str, params: Optional[Dict] = None, headers: Optional[Dict] = None, retries: int = 3, delay: int = 1) -> Optional[Dict]:
     """Get JSON data safely with retries and error handling."""
     for attempt in range(1, retries + 1):
         try:
-            async with session.get(url, params=params, headers=headers, timeout=10) as response:
+            async with session.get(url, params=params, headers=headers, timeout=15) as response:
                 if response.status == 200:
                     return await response.json()
-                elif response.status == 404:
+                elif response.status in [400, 404]:
+                    # 400/404 are common for missing characters on Raider.io, handle silently
                     return None
-                print(f"⚠️ Request failed (status {response.status}, attempt {attempt}/{retries}): {url}")
+                elif response.status == 429:
+                    # Rate limited, wait longer
+                    await asyncio.sleep(delay * 3)
+                
+                if response.status != 200:
+                     print(f"⚠️ Request failed (status {response.status}, attempt {attempt}/{retries}): {url}")
         except Exception as e:
-            print(f"⚠️ Request failed (attempt {attempt}/{retries}): {e}")
+            # Only print actual connection/timeout errors
+            if attempt == retries:
+                print(f"⚠️ Request failed (attempt {attempt}/{retries}): {e}")
         
         if attempt < retries:
             await asyncio.sleep(delay)
@@ -133,18 +145,22 @@ async def get_item_by_id(session: aiohttp.ClientSession, item_id: int) -> Option
         return {"id": data["id"], "name": data["name"]}
     return None
 
-
+async def get_guild_roster(session: aiohttp.ClientSession, realm: str, guild: str) -> List[Dict]:
     """Fetch guild roster from Blizzard API."""
     token = await get_access_token(session)
     if not token:
+        print("DEBUG: No Blizzard token available")
         return []
 
     url = f"https://us.api.blizzard.com/data/wow/guild/{realm}/{guild}/roster"
     headers = {"Authorization": f"Bearer {token}"}
     params = {"namespace": "profile-us", "locale": "en_US"}
+    
+    # print(f"DEBUG: Guild roster request - URL: {url}")
 
     data = await safe_get(session, url, params=params, headers=headers)
     if not data:
+        print(f"DEBUG: No data returned for guild {guild} on {realm}")
         return []
 
     members = []
@@ -154,6 +170,7 @@ async def get_item_by_id(session: aiohttp.ClientSession, item_id: int) -> Option
             "name": char["name"],
             "realm": char["realm"]["slug"]
         })
+    print(f"DEBUG: Found {len(members)} members in guild {guild}")
     return members
 
 async def get_mplus_data(session: aiohttp.ClientSession, name: str, realm: str) -> Dict[str, Any]:
@@ -173,8 +190,13 @@ async def get_mplus_data(session: aiohttp.ClientSession, name: str, realm: str) 
         "name": name,
         "fields": "mythic_plus_weekly_highest_level_runs,mythic_plus_scores_by_season:current,raid_progression"
     }
+    
+    # Debug: Print the exact request
+    # print(f"DEBUG: Raider.io request - URL: {url}, Params: {params}")
 
-    data = await safe_get(session, url, params=params)
+    async with raider_semaphore:
+        data = await safe_get(session, url, params=params)
+    
     if data is None:
         data = {
             "mythic_plus_weekly_highest_level_runs": [],
@@ -186,43 +208,43 @@ async def get_mplus_data(session: aiohttp.ClientSession, name: str, realm: str) 
     return data
 
 def get_top_keys(data: Dict) -> List[int]:
-    """Return top 3 M+ keys for the week."""
+    """Return 1st, 4th, and 8th highest M+ keys for the week (Vault Slots)."""
     runs = data.get("mythic_plus_weekly_highest_level_runs", [])
     keys = sorted([r["mythic_level"] for r in runs], reverse=True)
-    while len(keys) < 3:
-        keys.append(0)
-    return keys[:3]
+    
+    v1 = keys[0] if len(keys) >= 1 else 0
+    v2 = keys[3] if len(keys) >= 4 else 0
+    v3 = keys[7] if len(keys) >= 8 else 0
+    return [v1, v2, v3]
 
 def get_raid_vault(data: Dict) -> List[str]:
-    """Determine raid vault difficulties based on cumulative kills (M/H/N)."""
+    """Determine raid vault difficulties for the current expansion (Midnight = 12)."""
     raid = data.get("raid_progression")
     if not raid or not isinstance(raid, dict):
         return ["-", "-", "-"]
 
-    # Find the raid with any progress. Usually the first one, but let's be safe.
-    # We prioritize raids that have at least one kill.
-    raid_data = None
-    for slug in raid:
-        curr = raid[slug]
-        if curr.get("normal_bosses_killed", 0) > 0 or \
-           curr.get("heroic_bosses_killed", 0) > 0 or \
-           curr.get("mythic_bosses_killed", 0) > 0:
-            raid_data = curr
-            break
+    # We are in Midnight (Expansion 12). Only Midnight raids count for the Great Vault.
+    # We find the latest expansion ID in the data but floor it at 12 to ensure 
+    # we don't show old expansion progress in the seasonal vault leaderboard.
+    max_exp_in_data = max((curr.get("expansion_id", 0) for curr in raid.values()), default=0)
+    target_exp = max(max_exp_in_data, 12)
     
-    if not raid_data:
+    # Filter raids for the target expansion
+    current_raids = [curr for curr in raid.values() if curr.get("expansion_id") == target_exp]
+    
+    if not current_raids:
+        # If no raids for the target expansion found, they have no progress this expansion.
         return ["-", "-", "-"]
 
+    # Pick the latest raid in the expansion. 
+    # Raider.io typically puts the most recent raid first in the dictionary values.
+    raid_data = current_raids[0]
+    
     m = raid_data.get("mythic_bosses_killed", 0)
     h = raid_data.get("heroic_bosses_killed", 0)
     n = raid_data.get("normal_bosses_killed", 0)
 
-    # In WoW, vault slots are at 2, 4, and 6 bosses.
-    # A slot's difficulty is the highest difficulty you have at least [count] kills in.
-    # High difficulty kills count towards lower difficulty slots.
-    
-    # We assume 'h' and 'n' from Raider.io might not be cumulative (some APIs differ),
-    # so we ensure they are for our check.
+    # Standard Vault slots: 2, 4, 6 bosses
     h_plus = max(h, m)
     n_plus = max(n, h, m)
 
@@ -290,11 +312,8 @@ async def build_guild_vault(session: aiohttp.ClientSession) -> str:
     if token_price > 0:
         table.append(f"💰 WoW Token Price: {token_price:,.0f}g")
 
-    # Add Last Updated timestamp
-    now = time.strftime("%Y-%m-%d %H:%M:%S")
-    table.append(f"\nLast Updated: {now} (UTC)")
-
-    return "```" + "\n".join(table) + "```"
+    unix_now = int(time.time())
+    return "```" + "\n".join(table) + "```" + f"Last Updated: <t:{unix_now}:R>"
 
 async def get_wow_token_price(session: aiohttp.ClientSession) -> float:
     token = await get_access_token(session)
@@ -330,36 +349,66 @@ async def get_commodities_cached(session: aiohttp.ClientSession) -> Dict:
         return data
     return commodities_cache or {}
 
-async def search_items(session: aiohttp.ClientSession, item_name: str) -> Optional[Dict]:
+async def search_items(session: aiohttp.ClientSession, item_name: str) -> List[Dict]:
     token = await get_access_token(session)
-    if not token: return None
+    if not token: return []
 
-    # First, try to find an exact match using the search endpoint
     url = "https://us.api.blizzard.com/data/wow/search/item"
     headers = {"Authorization": f"Bearer {token}"}
-    params = {
-        "namespace": "static-us",
-        "locale": "en_US",
-        "name.en_US": item_name,
-        "orderby": "id"
-    }
     
-    data = await safe_get(session, url, headers=headers, params=params)
-    if data:
-        results = data.get("results", [])
-        for r in results:
-            item = r["data"]
-            if item.get("name", {}).get("en_US", "").lower() == item_name.lower():
-                return {"id": item["id"], "name": item["name"]["en_US"]}
-    
-    # If not found by name search, try by ID if input is an integer
-    try:
-        item_id = int(item_name)
-        return await get_item_by_id(session, item_id)
-    except ValueError:
-        pass # Not an integer, continue
+    # Try multiple variations of the name (original, spaces instead of dashes, etc.)
+    clean_name = item_name.strip()
+    variations = [clean_name]
+    if "-" in clean_name:
+        variations.append(clean_name.replace("-", " "))
+        variations.append(clean_name.replace("-", ""))
 
-    return None
+    for name_variant in variations:
+        # Strategy 1: Relevance (no sort) for exact variant - best for exact matches
+        # Strategy 2: Modern items first (id:desc) for wildcard - best for finding newest items
+        search_strategies = [
+            ({"name.en_US": name_variant}, {}),
+            ({"name.en_US": f"*{name_variant}*"}, {"orderby": "id:desc"}),
+        ]
+
+        for q_params, extra_params in search_strategies:
+            params = {
+                "namespace": "static-us",
+                "locale": "en_US",
+                **q_params,
+                **extra_params
+            }
+            data = await safe_get(session, url, headers=headers, params=params)
+            if data and data.get("results"):
+                results = data.get("results")
+                
+                # 1. Look for EXACT case-insensitive match
+                exact_matches = []
+                for r in results:
+                    name = r["data"].get("name", {}).get("en_US", "")
+                    if name.lower() == name_variant.lower() or name.lower() == clean_name.lower():
+                        exact_matches.append({"id": r["data"]["id"], "name": name})
+                
+                if exact_matches:
+                    return sorted(exact_matches, key=lambda x: x["id"])
+                
+                # 2. Look for "STARTS WITH" match
+                starts_with = []
+                for r in results:
+                    name = r["data"].get("name", {}).get("en_US", "")
+                    if name.lower().startswith(name_variant.lower()) or name.lower().startswith(clean_name.lower()):
+                        starts_with.append({"id": r["data"]["id"], "name": name})
+                if starts_with:
+                    first_name = starts_with[0]["name"]
+                    matches = [m for m in starts_with if m["name"] == first_name]
+                    return sorted(matches, key=lambda x: x["id"])
+
+    # Final Fallback: If it's "Infused X", try searching just "X"
+    if clean_name.lower().startswith("infused "):
+        shorter_name = clean_name[8:]
+        return await search_items(session, shorter_name)
+
+    return []
 
 @bot.event
 async def on_ready():
@@ -429,65 +478,106 @@ async def coin(ctx):
 async def guildvault(ctx):
     global GUILD_VAULT_MESSAGE_ID, LAST_CONTENT
     async with ctx.typing():
-        async with aiohttp.ClientSession() as session:
-            content = await build_guild_vault(session)
-            message = await ctx.send(content)
-            GUILD_VAULT_MESSAGE_ID = message.id
-            LAST_CONTENT = content
-            save_state()
+        try:
+            async with aiohttp.ClientSession() as session:
+                content = await build_guild_vault(session)
+                if len(content) > 2000:
+                    # Truncate or handle over-limit message
+                    # For now, let's just send a warning if it's too long
+                    # but we'll try to send the first 2000 chars or just fewer rows.
+                    # A better way is to reduce row count in build_guild_vault.
+                    print(f"⚠️ Warning: Leaderboard content too long ({len(content)} chars).")
+                    if content.endswith("```"):
+                        content = content[:1990] + "\n...```"
+                    else:
+                        content = content[:2000]
+
+                message = await ctx.send(content)
+                GUILD_VAULT_MESSAGE_ID = message.id
+                LAST_CONTENT = content
+                save_state()
+        except Exception as e:
+            print(f"❌ Error in guildvault command: {e}")
+            await ctx.send(f"⚠️ An error occurred while building the vault: {e}")
 
 @bot.command()
-async def price(ctx, item_name: str, realm: str = None):
+async def price(ctx, *, search: str):
     async with ctx.typing():
+        item_name = search
+        realm = None
+        if ":" in search:
+            parts = search.split(":", 1)
+            item_name = parts[0].strip()
+            realm = parts[1].strip()
+
         async with aiohttp.ClientSession() as session:
-            item_data = await search_items(session, item_name)
-            if not item_data:
-                await ctx.send(f"❌ Item **{item_name}** not found.")
+            item_results = await search_items(session, item_name)
+            if not item_results:
+                await ctx.send(f"❌ Item **{item_name}** not found. (v2.2)")
                 return
 
-            item_id = item_data["id"]
-            prices = []
+            # Group qualities if they have the same name
+            display_name = item_results[0]["name"]
+            
+            embed = discord.Embed(
+                title=f"💰 {display_name}",
+                color=discord.Color.gold()
+            )
 
-            # Check commodities
+            # Get commodities for all IDs
             commodities = await get_commodities_cached(session)
-            for auction in commodities.get("auctions", []):
-                if auction["item"]["id"] == item_id:
-                    prices.append(auction["unit_price"])
-
-            # Check realm if provided
+            
+            # Realm data if needed
+            realm_data = None
             if realm:
-                realm_id = REALMS.get(realm.lower().replace(" ", ""))
+                realm_key = realm.lower().replace(" ", "").replace("'", "")
+                realm_id = REALMS.get(realm_key)
+                if not realm_id:
+                    for k, v in REALMS.items():
+                        if realm_key in k:
+                            realm_id = v
+                            realm = k
+                            break
                 if realm_id:
                     token = await get_access_token(session)
                     url = f"https://us.api.blizzard.com/data/wow/connected-realm/{realm_id}/auctions"
                     headers = {"Authorization": f"Bearer {token}"}
                     params = {"namespace": "dynamic-us", "locale": "en_US"}
-                    data = await safe_get(session, url, headers=headers, params=params)
-                    if data:
-                        for auction in data.get("auctions", []):
-                            if auction["item"]["id"] == item_id:
-                                if "unit_price" in auction:
-                                    prices.append(auction["unit_price"])
-                                elif "buyout" in auction:
-                                    prices.append(auction["buyout"])
+                    realm_data = await safe_get(session, url, headers=headers, params=params)
 
-            if not prices:
-                await ctx.send(f"❌ No auctions found for **{item_data['name']}**.")
+            for i, item in enumerate(item_results):
+                item_id = item["id"]
+                prices = []
+                
+                # Check commodities
+                for auction in commodities.get("auctions", []):
+                    if auction["item"]["id"] == item_id:
+                        prices.append(auction["unit_price"])
+                
+                # Check realm
+                if realm_data:
+                    for auction in realm_data.get("auctions", []):
+                        if auction["item"]["id"] == item_id:
+                            if "unit_price" in auction:
+                                prices.append(auction["unit_price"])
+                            elif "buyout" in auction:
+                                prices.append(auction["buyout"])
+
+                if prices:
+                    prices_gold = [p / 10000 for p in prices]
+                    lowest = min(prices_gold)
+                    avg = sum(prices_gold) / len(prices_gold)
+                    
+                    # Modern WoW reagents typically follow ID order for quality: T1 < T2 < T3
+                    label = f"Quality {i+1}" if len(item_results) > 1 else "Price"
+                    val = f"**Lowest:** {lowest:,.2f}g\n**Avg:** {avg:,.2f}g\n**Listings:** {len(prices):,}"
+                    embed.add_field(name=label, value=val, inline=True)
+
+            if not embed.fields:
+                await ctx.send(f"❌ No auctions found for **{display_name}**.")
                 return
 
-            prices_gold = [p / 10000 for p in prices]
-            lowest = min(prices_gold)
-            avg = sum(prices_gold) / len(prices_gold)
-
-            embed = discord.Embed(
-                title=f"💰 {item_data['name']}",
-                color=discord.Color.gold()
-            )
-            embed.add_field(name="📉 Lowest", value=f"{lowest:,.2f}g", inline=True)
-            embed.add_field(name="📊 Average", value=f"{avg:,.2f}g", inline=True)
-            embed.add_field(name="📦 Listings", value=f"{len(prices):,}", inline=True)
             embed.set_footer(text=f"Realm: {realm.title() if realm else 'Global Commodities'}")
-            
             await ctx.send(embed=embed)
 
 if __name__ == "__main__":
