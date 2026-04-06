@@ -357,7 +357,7 @@ async def search_items(session: aiohttp.ClientSession, item_name: str) -> List[D
     headers = {"Authorization": f"Bearer {token}"}
     
     # Try multiple variations of the name (original, spaces instead of dashes, etc.)
-    clean_name = item_name.strip()
+    clean_name = item_name.strip().rstrip(".,")
     variations = [clean_name]
     if "-" in clean_name:
         variations.append(clean_name.replace("-", " "))
@@ -399,12 +399,53 @@ async def search_items(session: aiohttp.ClientSession, item_name: str) -> List[D
                     if name.lower().startswith(name_variant.lower()) or name.lower().startswith(clean_name.lower()):
                         starts_with.append({"id": r["data"]["id"], "name": name})
                 if starts_with:
-                    first_name = starts_with[0]["name"]
-                    matches = [m for m in starts_with if m["name"] == first_name]
-                    return sorted(matches, key=lambda x: x["id"])
+                    # Return all starts_with matches, limited to a reasonable number of unique names
+                    unique_names = []
+                    final_results = []
+                    for m in sorted(starts_with, key=lambda x: x["id"]):
+                        if m["name"] not in unique_names:
+                            if len(unique_names) >= 5: continue
+                            unique_names.append(m["name"])
+                        final_results.append(m)
+                    return final_results
+
+                # 3. Look for "CONTAINS" match (fallback for items with prefixes like "Pattern: ")
+                contains = []
+                for r in results:
+                    name = r["data"].get("name", {}).get("en_US", "")
+                    if name_variant.lower() in name.lower() or clean_name.lower() in name.lower():
+                        contains.append({"id": r["data"]["id"], "name": name})
+                if contains:
+                    # Sort by name length to get the most specific match first
+                    contains.sort(key=lambda x: len(x["name"]))
+                    unique_names = []
+                    final_results = []
+                    for m in contains:
+                        if m["name"] not in unique_names:
+                            if len(unique_names) >= 5: continue
+                            unique_names.append(m["name"])
+                        final_results.append(m)
+                    return final_results
+
+    # Look for common prefixes and typos
+    prefixes = [
+        "pattern", "patern", "recipe", "receipe", "design", "plans", "schematic", 
+        "formula", "technique", "contract", "plans", "blueprint"
+    ]
+    
+    clean_lower = clean_name.lower()
+    for p in prefixes:
+        # Check if it starts with prefix + space or prefix + colon
+        if clean_lower.startswith(p + " ") or clean_lower.startswith(p + ":"):
+            # Strip prefix and any following colon/space
+            shorter_name = clean_name[len(p):].lstrip(": ").strip()
+            if shorter_name:
+                shorter_results = await search_items(session, shorter_name)
+                if shorter_results:
+                    return shorter_results
 
     # Final Fallback: If it's "Infused X", try searching just "X"
-    if clean_name.lower().startswith("infused "):
+    if clean_lower.startswith("infused "):
         shorter_name = clean_name[8:]
         return await search_items(session, shorter_name)
 
@@ -505,10 +546,31 @@ async def price(ctx, *, search: str):
     async with ctx.typing():
         item_name = search
         realm = None
+        
         if ":" in search:
-            parts = search.split(":", 1)
-            item_name = parts[0].strip()
-            realm = parts[1].strip()
+            # Check if the part after the LAST colon is a known realm
+            parts = search.rsplit(":", 1)
+            potential_realm = parts[1].strip().lower().replace(" ", "").replace("'", "")
+            
+            is_realm = potential_realm in REALMS
+            if not is_realm:
+                # Also check partial matches in REALMS
+                for k in REALMS.keys():
+                    if potential_realm in k:
+                        is_realm = True
+                        break
+            
+            if is_realm:
+                item_name = parts[0].strip()
+                realm = parts[1].strip()
+            else:
+                # Colon is likely part of the item name (e.g. "Pattern: ...")
+                item_name = search
+                realm = None
+
+        # Fallback to default realm if not a commodity and no realm specified
+        if not realm:
+            realm = "frostmourne"
 
         async with aiohttp.ClientSession() as session:
             item_results = await search_items(session, item_name)
@@ -518,16 +580,17 @@ async def price(ctx, *, search: str):
 
             # Group qualities if they have the same name
             display_name = item_results[0]["name"]
+            unique_names = list(set(r["name"] for r in item_results))
             
             embed = discord.Embed(
-                title=f"💰 {display_name}",
+                title=f"💰 {display_name}" if len(unique_names) == 1 else "💰 Search Results",
                 color=discord.Color.gold()
             )
 
             # Get commodities for all IDs
             commodities = await get_commodities_cached(session)
             
-            # Realm data if needed
+            # Get realm data
             realm_data = None
             if realm:
                 realm_key = realm.lower().replace(" ", "").replace("'", "")
@@ -547,6 +610,7 @@ async def price(ctx, *, search: str):
 
             for i, item in enumerate(item_results):
                 item_id = item["id"]
+                current_item_name = item["name"]
                 prices = []
                 
                 # Check commodities
@@ -554,7 +618,7 @@ async def price(ctx, *, search: str):
                     if auction["item"]["id"] == item_id:
                         prices.append(auction["unit_price"])
                 
-                # Check realm
+                # Check realm (if not a commodity or to find realm-specific versions)
                 if realm_data:
                     for auction in realm_data.get("auctions", []):
                         if auction["item"]["id"] == item_id:
@@ -568,16 +632,26 @@ async def price(ctx, *, search: str):
                     lowest = min(prices_gold)
                     avg = sum(prices_gold) / len(prices_gold)
                     
-                    # Modern WoW reagents typically follow ID order for quality: T1 < T2 < T3
-                    label = f"Quality {i+1}" if len(item_results) > 1 else "Price"
+                    # Label based on name and quality
+                    label = current_item_name
+                    if len(item_results) > 1:
+                        # If there are multiple items with the same name, they are likely qualities
+                        same_name_count = sum(1 for r in item_results if r["name"] == current_item_name)
+                        if same_name_count > 1:
+                            # Figure out which quality this is
+                            quality_idx = [r["id"] for r in item_results if r["name"] == current_item_name].index(item_id)
+                            label += f" (Q{quality_idx+1})"
+                    
                     val = f"**Lowest:** {lowest:,.2f}g\n**Avg:** {avg:,.2f}g\n**Listings:** {len(prices):,}"
                     embed.add_field(name=label, value=val, inline=True)
 
             if not embed.fields:
-                await ctx.send(f"❌ No auctions found for **{display_name}**.")
+                found_names = ", ".join(unique_names)
+                await ctx.send(f"❌ No auctions found for **{found_names}** on {realm.title() if realm else 'Global'}.")
                 return
 
-            embed.set_footer(text=f"Realm: {realm.title() if realm else 'Global Commodities'}")
+            footer_text = f"Realm: {realm.title()}" if realm else "Global Commodities"
+            embed.set_footer(text=footer_text)
             await ctx.send(embed=embed)
 
 if __name__ == "__main__":
