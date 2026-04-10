@@ -173,88 +173,132 @@ async def get_guild_roster(session: aiohttp.ClientSession, realm: str, guild: st
     print(f"DEBUG: Found {len(members)} members in guild {guild}")
     return members
 
-async def get_mplus_data(session: aiohttp.ClientSession, name: str, realm: str) -> Dict[str, Any]:
-    """Fetch mythic plus and raid data from Raider.io."""
-    key = f"{name}-{realm}".lower()
-    now = time.time()
+blizzard_semaphore = asyncio.Semaphore(10) # Limit concurrent Blizzard profile requests
 
-    if key in raider_cache:
-        data, timestamp = raider_cache[key]
-        if now - timestamp < CACHE_DURATION:
-            return data
+async def get_vault_data(session: aiohttp.ClientSession, name: str, realm: str) -> tuple:
+    """Fetch M+ and Raid vault data from Raider.io and Blizzard API."""
+    token = await get_access_token(session)
+    if not token:
+        return [0, 0, 0], ["-", "-", "-"], 0
 
-    url = "https://raider.io/api/v1/characters/profile"
-    params = {
-        "region": "us",
-        "realm": realm,
-        "name": name,
-        "fields": "mythic_plus_weekly_highest_level_runs,mythic_plus_scores_by_season:current,raid_progression"
-    }
+    headers = {"Authorization": f"Bearer {token}"}
+    params = {"namespace": "profile-us", "locale": "en_US"}
+    base_url = f"https://us.api.blizzard.com/profile/wow/character/{realm}/{urllib.parse.quote(name.lower())}"
     
-    # Debug: Print the exact request
-    # print(f"DEBUG: Raider.io request - URL: {url}, Params: {params}")
-
-    async with raider_semaphore:
-        data = await safe_get(session, url, params=params)
+    # Try Raider.io for M+ data (faster updates, avoids hardcoded period/season IDs)
+    rio_url = f"https://raider.io/api/v1/characters/profile?region=us&realm={urllib.parse.quote(realm.lower())}&name={urllib.parse.quote(name.lower())}&fields=mythic_plus_weekly_highest_level_runs,mythic_plus_scores_by_season:current"
     
-    if data is None:
-        data = {
-            "mythic_plus_weekly_highest_level_runs": [],
-            "mythic_plus_scores_by_season": [],
-            "raid_progression": {}
-        }
+    # Check Raider.io Cache
+    cache_key = f"{name}-{realm}".lower()
+    cached_rio = None
+    if cache_key in raider_cache:
+        ts, data = raider_cache[cache_key]
+        if time.time() - ts < CACHE_DURATION:
+            cached_rio = data
 
-    raider_cache[key] = (data, now)
-    return data
+    # Fetch all data in parallel
+    async with blizzard_semaphore:
+        tasks = [
+            safe_get(session, f"{base_url}/encounters/raids", params=params, headers=headers),
+            safe_get(session, f"{base_url}/mythic-keystone-profile", params=params, headers=headers)
+        ]
+        if not cached_rio:
+            tasks.append(safe_get(session, rio_url))
+        
+        # We use a gather but handle the fact that Raider.io task might not be there
+        responses = await asyncio.gather(*tasks)
+        raid_data = responses[0]
+        mplus_data = responses[1]
+        rio_data = cached_rio if cached_rio else (responses[2] if len(responses) > 2 else None)
+        
+        if rio_data and not cached_rio:
+            raider_cache[cache_key] = (time.time(), rio_data)
 
-def get_top_keys(data: Dict) -> List[int]:
-    """Return 1st, 4th, and 8th highest M+ keys for the week (Vault Slots)."""
-    runs = data.get("mythic_plus_weekly_highest_level_runs", [])
-    keys = sorted([r["mythic_level"] for r in runs], reverse=True)
+    # 1. Process M+ Data & Score
+    keys = [0, 0, 0]
+    score = 0
     
-    v1 = keys[0] if len(keys) >= 1 else 0
-    v2 = keys[3] if len(keys) >= 4 else 0
-    v3 = keys[7] if len(keys) >= 8 else 0
-    return [v1, v2, v3]
+    # Prefer Raider.io for M+ because it handles current week better
+    if rio_data:
+        runs = rio_data.get("mythic_plus_weekly_highest_level_runs", [])
+        # Raider.io uses 'mythic_level'
+        levels = sorted([r.get("mythic_level", 0) for r in runs if isinstance(r, dict)], reverse=True)
+        if levels:
+            keys[0] = levels[0]
+            keys[1] = levels[3] if len(levels) >= 4 else 0
+            keys[2] = levels[7] if len(levels) >= 8 else 0
+        
+        seasons = rio_data.get("mythic_plus_scores_by_season", [])
+        if seasons and isinstance(seasons, list):
+            score = int(seasons[0].get("scores", {}).get("all", 0))
+    elif mplus_data:
+        # Fallback to Blizzard M+ profile
+        curr_period = mplus_data.get("current_period", {})
+        runs = curr_period.get("best_runs", [])
+        # Blizzard uses 'keystone_level'
+        levels = sorted([r.get("keystone_level", 0) for r in runs if isinstance(r, dict)], reverse=True)
+        if levels:
+            keys[0] = levels[0]
+            keys[1] = levels[3] if len(levels) >= 4 else 0
+            keys[2] = levels[7] if len(levels) >= 8 else 0
 
-def get_raid_vault(data: Dict) -> List[str]:
-    """Determine raid vault difficulties for the current expansion (Midnight = 12)."""
-    raid = data.get("raid_progression")
-    if not raid or not isinstance(raid, dict):
-        return ["-", "-", "-"]
+    # 2. Process Raid Data
+    raid = ["-", "-", "-"]
+    if raid_data:
+        # Determine last Tuesday (US Reset) - Tuesday is 1 in tm_wday
+        now = time.time()
+        dt_utc = time.gmtime(now)
+        days_since_tue = (dt_utc.tm_wday - 1) % 7
 
-    # We are in Midnight (Expansion 12). Only Midnight raids count for the Great Vault.
-    # We find the latest expansion ID in the data but floor it at 12 to ensure 
-    # we don't show old expansion progress in the seasonal vault leaderboard.
-    max_exp_in_data = max((curr.get("expansion_id", 0) for curr in raid.values()), default=0)
-    target_exp = max(max_exp_in_data, 12)
-    
-    # Filter raids for the target expansion
-    current_raids = [curr for curr in raid.values() if curr.get("expansion_id") == target_exp]
-    
-    if not current_raids:
-        # If no raids for the target expansion found, they have no progress this expansion.
-        return ["-", "-", "-"]
+        import calendar
+        # Construct the last reset point as Tuesday 15:00 UTC
+        reset_day = time.gmtime(now - days_since_tue * 86400)
+        reset_time_str = f"{reset_day.tm_year}-{reset_day.tm_mon}-{reset_day.tm_mday} 15:00:00"
+        last_reset_ts = calendar.timegm(time.strptime(reset_time_str, "%Y-%m-%d %H:%M:%S"))
 
-    # Pick the latest raid in the expansion. 
-    # Raider.io typically puts the most recent raid first in the dictionary values.
-    raid_data = current_raids[0]
-    
-    m = raid_data.get("mythic_bosses_killed", 0)
-    h = raid_data.get("heroic_bosses_killed", 0)
-    n = raid_data.get("normal_bosses_killed", 0)
+        if now < last_reset_ts:
+            last_reset_ts -= 7 * 86400
 
-    # Standard Vault slots: 2, 4, 6 bosses
-    h_plus = max(h, m)
-    n_plus = max(n, h, m)
+        # Midnight Expansion Identifiers
+        # We check both name and common Journal IDs for the Profile API
+        CURRENT_EXPANSION_NAMES = ["Midnight", "The Midnight Expansion"]
+        CURRENT_EXPANSION_IDS = [501, 17, 506]
 
-    def get_difficulty(count):
-        if m >= count: return "M"
-        if h_plus >= count: return "H"
-        if n_plus >= count: return "N"
-        return "-"
+        weekly_bosses = {"mythic": set(), "heroic": set(), "normal": set()}
 
-    return [get_difficulty(2), get_difficulty(4), get_difficulty(6)]
+        for exp in raid_data.get("expansions", []):
+            expansion_info = exp.get("expansion", {})
+            exp_name = expansion_info.get("name")
+            exp_id = expansion_info.get("id")
+            
+            # ONLY count kills from the current expansion (Midnight)
+            is_midnight = (exp_name in CURRENT_EXPANSION_NAMES) or (exp_id in CURRENT_EXPANSION_IDS)
+            
+            if is_midnight:
+                for instance in exp.get("instances", []):
+                    for mode in instance.get("modes", []):
+                        diff = mode["difficulty"]["type"].lower()
+                        if diff in weekly_bosses:
+                            for encounter in mode.get("progress", {}).get("encounters", []):
+                                last_kill = encounter.get("last_kill_timestamp", 0) / 1000
+                                if last_kill >= last_reset_ts:
+                                    weekly_bosses[diff].add(encounter["encounter"]["name"])
+
+        m = len(weekly_bosses["mythic"])
+        h = len(weekly_bosses["heroic"])
+        n = len(weekly_bosses["normal"])
+        
+        h_plus = h + m
+        n_plus = n + h + m
+
+        def get_diff(count):
+            if m >= count: return "M"
+            if h_plus >= count: return "H"
+            if n_plus >= count: return "N"
+            return "-"
+        raid = [get_diff(2), get_diff(4), get_diff(6)]
+
+    return keys, raid, score
 
 def format_row(rank: int, name: str, keys: List[int], raid: List[str], score: int, name_width: int) -> str:
     display_name = name if len(name) <= name_width else name[:name_width-1] + "…"
@@ -264,17 +308,11 @@ def format_row(rank: int, name: str, keys: List[int], raid: List[str], score: in
 
 async def fetch_char_stats(session: aiohttp.ClientSession, char: Dict) -> Optional[tuple]:
     """Helper for parallel character fetching."""
-    data = await get_mplus_data(session, char["name"], char["realm"])
-    keys = get_top_keys(data)
-    raid = get_raid_vault(data)
-    score = 0
-    if data.get("mythic_plus_scores_by_season"):
-        try:
-            score = int(data["mythic_plus_scores_by_season"][0]["scores"]["all"])
-        except (KeyError, IndexError, ValueError):
-            score = 0
+    keys, raid, score = await get_vault_data(session, char["name"], char["realm"])
     
-    if sum(keys) > 0 or score > 0 or any(r != "-" for r in raid):
+    # ONLY show characters who have actually done something THIS WEEK for the vault.
+    # If they only have a score from previous weeks/seasons, they shouldn't be on the vault board.
+    if sum(keys) > 0 or any(r != "-" for r in raid):
         return (char["name"], keys, raid, score)
     return None
 
