@@ -141,9 +141,52 @@ async def get_item_by_id(session: aiohttp.ClientSession, item_id: int) -> Option
     
     data = await safe_get(session, url, headers=headers, params=params)
     if data:
-        # Blizzard API returns item name as 'name' directly for this endpoint
-        return {"id": data["id"], "name": data["name"]}
+        preview_item = data.get("preview_item", {})
+        spells = preview_item.get("spells", [])
+        primary_spell = spells[0].get("description") if spells else None
+        crafted_quality = data.get("crafted_quality")
+        modified_crafting = data.get("modified_crafting") or {}
+        modified_crafting_category = modified_crafting.get("category") or {}
+        item_class = data.get("item_class") or {}
+        tier = None
+        if isinstance(crafted_quality, dict):
+            tier = crafted_quality.get("tier")
+        if tier is None:
+            tier = data.get("quality", {}).get("tier")
+
+        return {
+            "id": data["id"],
+            "name": data["name"],
+            "tier": tier,
+            "item_level": data.get("level"),
+            "effect": primary_spell,
+            "item_class_id": item_class.get("id"),
+            "modified_crafting_id": modified_crafting.get("id"),
+            "modified_crafting_category_id": modified_crafting_category.get("id"),
+        }
     return None
+
+async def enrich_item_results(session: aiohttp.ClientSession, items: List[Dict]) -> List[Dict]:
+    """Hydrate matched items with detail fields Blizzard omits from search results."""
+    item_details = await asyncio.gather(*(get_item_by_id(session, item["id"]) for item in items))
+
+    enriched_items = []
+    for item, details in zip(items, item_details):
+        merged = dict(item)
+        if details:
+            for key in (
+                "tier",
+                "item_level",
+                "effect",
+                "item_class_id",
+                "modified_crafting_id",
+                "modified_crafting_category_id",
+            ):
+                if details.get(key) is not None:
+                    merged[key] = details[key]
+        enriched_items.append(merged)
+
+    return enriched_items
 
 async def get_guild_roster(session: aiohttp.ClientSession, realm: str, guild: str) -> List[Dict]:
     """Fetch guild roster from Blizzard API."""
@@ -423,24 +466,29 @@ async def search_items(session: aiohttp.ClientSession, item_name: str) -> List[D
                 # 1. Look for EXACT case-insensitive match
                 exact_matches = []
                 for r in results:
-                    name = r["data"].get("name", {}).get("en_US", "")
+                    item_data = r["data"]
+                    name = item_data.get("name", {}).get("en_US", "")
                     if name.lower() == name_variant.lower() or name.lower() == clean_name.lower():
-                        exact_matches.append({"id": r["data"]["id"], "name": name})
+                        tier = item_data.get("quality", {}).get("tier")
+                        exact_matches.append({"id": item_data["id"], "name": name, "tier": tier})
                 
                 if exact_matches:
-                    return sorted(exact_matches, key=lambda x: x["id"])
+                    # Sort by tier if available, otherwise by ID
+                    return sorted(exact_matches, key=lambda x: (x.get("tier") or 0, x["id"]))
                 
                 # 2. Look for "STARTS WITH" match
                 starts_with = []
                 for r in results:
-                    name = r["data"].get("name", {}).get("en_US", "")
+                    item_data = r["data"]
+                    name = item_data.get("name", {}).get("en_US", "")
                     if name.lower().startswith(name_variant.lower()) or name.lower().startswith(clean_name.lower()):
-                        starts_with.append({"id": r["data"]["id"], "name": name})
+                        tier = item_data.get("quality", {}).get("tier")
+                        starts_with.append({"id": item_data["id"], "name": name, "tier": tier})
                 if starts_with:
                     # Return all starts_with matches, limited to a reasonable number of unique names
                     unique_names = []
                     final_results = []
-                    for m in sorted(starts_with, key=lambda x: x["id"]):
+                    for m in sorted(starts_with, key=lambda x: (x.get("tier") or 0, x["id"])):
                         if m["name"] not in unique_names:
                             if len(unique_names) >= 5: continue
                             unique_names.append(m["name"])
@@ -450,12 +498,14 @@ async def search_items(session: aiohttp.ClientSession, item_name: str) -> List[D
                 # 3. Look for "CONTAINS" match (fallback for items with prefixes like "Pattern: ")
                 contains = []
                 for r in results:
-                    name = r["data"].get("name", {}).get("en_US", "")
+                    item_data = r["data"]
+                    name = item_data.get("name", {}).get("en_US", "")
                     if name_variant.lower() in name.lower() or clean_name.lower() in name.lower():
-                        contains.append({"id": r["data"]["id"], "name": name})
+                        tier = item_data.get("quality", {}).get("tier")
+                        contains.append({"id": item_data["id"], "name": name, "tier": tier})
                 if contains:
-                    # Sort by name length to get the most specific match first
-                    contains.sort(key=lambda x: len(x["name"]))
+                    # Sort by name length primarily, then by tier and ID to be consistent
+                    contains.sort(key=lambda x: (len(x["name"]), x.get("tier") or 0, x["id"]))
                     unique_names = []
                     final_results = []
                     for m in contains:
@@ -616,6 +666,8 @@ async def price(ctx, *, search: str):
                 await ctx.send(f"❌ Item **{item_name}** not found. (v2.2)")
                 return
 
+            item_results = await enrich_item_results(session, item_results)
+
             # Group qualities if they have the same name
             display_name = item_results[0]["name"]
             unique_names = list(set(r["name"] for r in item_results))
@@ -624,6 +676,8 @@ async def price(ctx, *, search: str):
                 title=f"💰 {display_name}" if len(unique_names) == 1 else "💰 Search Results",
                 color=discord.Color.gold()
             )
+            used_commodity_prices = False
+            used_realm_prices = False
 
             # Get commodities for all IDs
             commodities = await get_commodities_cached(session)
@@ -650,20 +704,29 @@ async def price(ctx, *, search: str):
                 item_id = item["id"]
                 current_item_name = item["name"]
                 prices = []
+                commodity_prices = []
+                realm_prices = []
                 
                 # Check commodities
                 for auction in commodities.get("auctions", []):
                     if auction["item"]["id"] == item_id:
-                        prices.append(auction["unit_price"])
+                        commodity_prices.append(auction["unit_price"])
                 
                 # Check realm (if not a commodity or to find realm-specific versions)
                 if realm_data:
                     for auction in realm_data.get("auctions", []):
                         if auction["item"]["id"] == item_id:
                             if "unit_price" in auction:
-                                prices.append(auction["unit_price"])
+                                realm_prices.append(auction["unit_price"])
                             elif "buyout" in auction:
-                                prices.append(auction["buyout"])
+                                realm_prices.append(auction["buyout"])
+
+                prices.extend(commodity_prices)
+                prices.extend(realm_prices)
+                if commodity_prices:
+                    used_commodity_prices = True
+                if realm_prices:
+                    used_realm_prices = True
 
                 if prices:
                     prices_gold = [p / 10000 for p in prices]
@@ -672,14 +735,67 @@ async def price(ctx, *, search: str):
                     
                     # Label based on name and quality
                     label = current_item_name
-                    if len(item_results) > 1:
-                        # If there are multiple items with the same name, they are likely qualities
-                        same_name_count = sum(1 for r in item_results if r["name"] == current_item_name)
-                        if same_name_count > 1:
-                            # Figure out which quality this is
-                            quality_idx = [r["id"] for r in item_results if r["name"] == current_item_name].index(item_id)
-                            label += f" (Q{quality_idx+1})"
-                    
+
+                    # Try to use the actual tier from Blizzard API if available
+                    tier = item.get("tier")
+                    item_level = item.get("item_level")
+                    same_name_results = [r for r in item_results if r["name"] == current_item_name]
+                    same_name_count = len(same_name_results)
+                    distinct_item_levels = len(
+                        {r.get("item_level") for r in same_name_results if r.get("item_level") is not None}
+                    ) > 1
+                    current_category_id = item.get("modified_crafting_category_id")
+                    inferred_reagent_quality = (
+                        same_name_count > 1
+                        and current_category_id is not None
+                        and all(r.get("modified_crafting_category_id") == current_category_id for r in same_name_results)
+                        and all(r.get("item_class_id") == 7 for r in same_name_results)
+                    )
+
+                    if tier:
+                        stars = "⭐" * tier
+                        label += f" ({stars})"
+                    elif same_name_count > 1:
+                        if inferred_reagent_quality:
+                            ranked_results = sorted(same_name_results, key=lambda x: x["id"])
+                            quality_idx = [r["id"] for r in ranked_results].index(item_id) + 1
+                            label += f" (Q{quality_idx})"
+                        elif distinct_item_levels:
+                            # Only infer Q1/Q2/... when item level actually separates the variants.
+                            ranked_results = sorted(
+                                same_name_results,
+                                key=lambda x: ((x.get("item_level") or 0), x["id"])
+                            )
+                            variant_idx = [r["id"] for r in ranked_results].index(item_id) + 1
+                            if item_level:
+                                label += f" (Q{variant_idx}, ilvl {item_level})"
+                            else:
+                                label += f" (Q{variant_idx})"
+                        else:
+                            # Gathered materials often share the same item level across qualities,
+                            # so avoid presenting a guessed ordering as an actual quality tier.
+                            ranked_results = sorted(same_name_results, key=lambda x: x["id"])
+                            variant_idx = [r["id"] for r in ranked_results].index(item_id) + 1
+                            label += f" (Variant {variant_idx})"
+
+                    # Only mark the "best" quality when Blizzard explicitly provides
+                    # a tier, or when the same-name variants clearly differ by item level.
+                    if same_name_count > 1:
+                        if any(r.get("tier") is not None for r in same_name_results):
+                            max_tier = max(r.get("tier", 0) for r in same_name_results)
+                            current_tier = tier or 0
+                            if current_tier == max_tier:
+                                label += " ✅"
+                        elif inferred_reagent_quality:
+                            max_item_id = max(r["id"] for r in same_name_results)
+                            if item_id == max_item_id:
+                                label += " ✅"
+                        elif distinct_item_levels:
+                            max_item_level = max(r.get("item_level", 0) for r in same_name_results)
+                            current_item_level = item_level or 0
+                            if current_item_level == max_item_level:
+                                label += " ✅"
+
                     val = f"**Lowest:** {lowest:,.2f}g\n**Avg:** {avg:,.2f}g\n**Listings:** {len(prices):,}"
                     embed.add_field(name=label, value=val, inline=True)
 
@@ -688,7 +804,14 @@ async def price(ctx, *, search: str):
                 await ctx.send(f"❌ No auctions found for **{found_names}** on {realm.title() if realm else 'Global'}.")
                 return
 
-            footer_text = f"Realm: {realm.title()}" if realm else "Global Commodities"
+            if used_commodity_prices and used_realm_prices and realm:
+                footer_text = f"Sources: Global Commodities + {realm.title()}"
+            elif used_commodity_prices:
+                footer_text = "Global Commodities"
+            elif realm:
+                footer_text = f"Realm: {realm.title()}"
+            else:
+                footer_text = "Global Commodities"
             embed.set_footer(text=footer_text)
             await ctx.send(embed=embed)
 
