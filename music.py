@@ -6,35 +6,26 @@ import os
 from collections import deque
 
 YDL_OPTIONS = {
-    'format': 'bestaudio[ext=m4a]/bestaudio/best',
+    'format': 'bestaudio/best',
     'noplaylist': True,
     'quiet': True,
     'no_warnings': True,
     'default_search': 'ytsearch',
-    'source_address': '0.0.0.0',
 
-    # ✅ Helps avoid bot detection
+    'cookiefile': os.path.join(os.path.dirname(__file__), 'cookies.txt'),
+
     'http_headers': {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-us,en;q=0.5',
-        'Sec-Fetch-Mode': 'navigate',
+        'User-Agent': 'Mozilla/5.0',
     },
 
-    'referer': 'https://www.google.com/',
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['android', 'web'],
+        }
+    },
 
-    # ✅ Stability improvements
-    'geo_bypass': True,
-    'retries': 10,
-    'fragment_retries': 10,
-
-    # ✅ Avoid incomplete extraction issues
-    'extract_flat': False,
-
-    # ✅ Fixed signature solving (required for 2026 YouTube changes)
     'js_runtimes': {'node': {}},
     'remote_components': ['ejs:github'],
-    'cookiefile': os.path.join(os.path.dirname(__file__), 'cookies.txt'),
 }
 
 FFMPEG_OPTIONS = {
