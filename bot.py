@@ -158,7 +158,6 @@ async def get_item_by_id(session: aiohttp.ClientSession, item_id: int) -> Option
     data = await safe_get(session, url, headers=headers, params=params)
     if data:
         preview_item = data.get("preview_item", {})
-        spells = preview_item.get("spells", [])
         crafted_quality = data.get("crafted_quality")
         modified_crafting = data.get("modified_crafting") or {}
         modified_crafting_category = modified_crafting.get("category") or {}
@@ -175,7 +174,6 @@ async def get_item_by_id(session: aiohttp.ClientSession, item_id: int) -> Option
             "tier": tier,
             "item_level": data.get("level"),
             "item_class_id": item_class.get("id"),
-            "modified_crafting_id": modified_crafting.get("id"),
             "modified_crafting_category_id": modified_crafting_category.get("id"),
         }
     return None
@@ -192,7 +190,6 @@ async def enrich_item_results(session: aiohttp.ClientSession, items: List[Dict])
                 "tier",
                 "item_level",
                 "item_class_id",
-                "modified_crafting_id",
                 "modified_crafting_category_id",
             ):
                 if details.get(key) is not None:

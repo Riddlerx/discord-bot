@@ -6,28 +6,55 @@ import os
 from collections import deque
 
 YDL_OPTIONS = {
-    'format': 'bestaudio/best',
+    'format': 'bestaudio[ext=m4a]/bestaudio/best',
     'noplaylist': True,
     'quiet': True,
     'no_warnings': True,
     'default_search': 'ytsearch',
     'source_address': '0.0.0.0',
+
+    # ✅ Helps avoid bot detection
+    'http_headers': {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+    },
+
+    # ✅ Stability improvements
+    'geo_bypass': True,
+    'retries': 10,
+    'fragment_retries': 10,
+
+    # ✅ Avoid incomplete extraction issues
+    'extract_flat': False,
+
+    # ✅ Fixed signature solving (required for 2026 YouTube changes)
+    'js_runtimes': {'node': {}},
+    'remote_components': ['ejs:github'],
+    'cookiefile': 'cookies.txt', 
 }
 
 FFMPEG_OPTIONS = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn',
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -reconnect_at_eof 1',
+    'options': '-vn -loglevel warning',
 }
 
 MUSIC_TEXT_CHANNEL = os.getenv("MUSIC_TEXT_CHANNEL", "music-bot")
 
 def fetch_info(query: str) -> dict:
     """Blocking yt-dlp call — run in executor so it doesn't freeze the bot."""
-    with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
-        info = ydl.extract_info(query, download=False)
-    if 'entries' in info:
-        info = info['entries'][0]
-    return info
+    import time
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
+                info = ydl.extract_info(query, download=False)
+            if 'entries' in info:
+                info = info['entries'][0]
+            return info
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise e
+            time.sleep(1)
+    return {}
 
 # ── Per-guild state ────────────────────────────────────────────────────────────
 
@@ -96,8 +123,14 @@ class Music(commands.Cog):
         title = info.get('title', 'Unknown')
         self.state(ctx.guild.id).current_title = title
 
+        ffmpeg_opts = FFMPEG_OPTIONS.copy()
+        ffmpeg_opts['before_options'] += (
+            ' -user_agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" '
+            '-referer "https://www.youtube.com/"'
+        )
+
         source = discord.PCMVolumeTransformer(
-            discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS),
+            discord.FFmpegPCMAudio(url, **ffmpeg_opts),
             volume=self.state(ctx.guild.id).volume,
         )
         try:
