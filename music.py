@@ -60,9 +60,10 @@ def fetch_info(query: str) -> dict:
 
 class GuildState:
     def __init__(self):
-        self.queue: deque[str] = deque()
+        self.queue: deque[tuple[str, str]] = deque()  # Store (query, title)
         self.current_title: str | None = None
         self.volume: float = 0.5
+        self.is_loading: bool = False
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
 
@@ -109,19 +110,29 @@ class Music(commands.Cog):
             return False
         return True
 
-    async def _play_query(self, ctx: commands.Context, query: str):
+    async def _play_query(self, ctx: commands.Context, query: str, title: str | None = None):
         """Fetch audio info and start playing."""
+        st = self.state(ctx.guild.id)
+        st.is_loading = True
+        
         loop = asyncio.get_event_loop()
         try:
-            info = await loop.run_in_executor(None, lambda: fetch_info(query))
+            if not title:
+                info = await loop.run_in_executor(None, lambda: fetch_info(query))
+                url = info['url']
+                title = info.get('title', 'Unknown')
+            else:
+                # If title was provided, we still need the URL
+                info = await loop.run_in_executor(None, lambda: fetch_info(query))
+                url = info['url']
         except Exception as e:
             await ctx.send(f"❌ Could not load track: {e}")
+            st.is_loading = False
             self._advance(ctx)
             return
 
-        url = info['url']
-        title = info.get('title', 'Unknown')
-        self.state(ctx.guild.id).current_title = title
+        st.current_title = title
+        st.is_loading = False
 
         ffmpeg_opts = FFMPEG_OPTIONS.copy()
         ffmpeg_opts['before_options'] += (
@@ -131,15 +142,18 @@ class Music(commands.Cog):
 
         source = discord.PCMVolumeTransformer(
             discord.FFmpegPCMAudio(url, **ffmpeg_opts),
-            volume=self.state(ctx.guild.id).volume,
+            volume=st.volume,
         )
         try:
-            ctx.voice_client.play(source, after=self._make_after_callback(ctx))
+            if ctx.voice_client:
+                ctx.voice_client.play(source, after=self._make_after_callback(ctx))
+                await ctx.send(f"▶️ Now playing: **{title}**")
+            else:
+                st.current_title = None
         except Exception as exc:
             await ctx.send(f"❌ Playback failed: {exc}")
-            self.state(ctx.guild.id).current_title = None
-            return
-        await ctx.send(f"▶️ Now playing: **{title}**")
+            st.current_title = None
+            self._advance(ctx)
 
     def _make_after_callback(self, ctx: commands.Context):
         def _after(error):
@@ -153,9 +167,9 @@ class Music(commands.Cog):
         """Called when a track ends — pops the next item from the queue."""
         st = self.state(ctx.guild.id)
         if st.queue:
-            query = st.queue.popleft()
+            query, title = st.queue.popleft()
             asyncio.run_coroutine_threadsafe(
-                self._play_query(ctx, query), self.bot.loop
+                self._play_query(ctx, query, title), self.bot.loop
             )
         else:
             st.current_title = None
@@ -173,9 +187,10 @@ class Music(commands.Cog):
         if not await self._ensure_voice(ctx):
             return
 
+        st = self.state(ctx.guild.id)
         vc = ctx.voice_client
 
-        if vc.is_playing() or vc.is_paused():
+        if vc.is_playing() or vc.is_paused() or st.is_loading:
             async with ctx.typing():
                 loop = asyncio.get_event_loop()
                 try:
@@ -184,8 +199,8 @@ class Music(commands.Cog):
                 except Exception:
                     title = query
 
-            self.state(ctx.guild.id).queue.append(query)
-            pos = len(self.state(ctx.guild.id).queue)
+            st.queue.append((query, title))
+            pos = len(st.queue)
             await ctx.send(f"📋 Added to queue (#{pos}): **{title}**")
         else:
             async with ctx.typing():
@@ -194,9 +209,19 @@ class Music(commands.Cog):
     @commands.command()
     async def skip(self, ctx):
         """Skip the current song."""
-        if ctx.voice_client and (ctx.voice_client.is_playing() or ctx.voice_client.is_paused()):
+        st = self.state(ctx.guild.id)
+        if not ctx.voice_client:
+            return await ctx.send("❌ Not connected to voice.")
+
+        if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
             ctx.voice_client.stop()
             await ctx.send("⏭️ Skipped.")
+        elif st.is_loading:
+            await ctx.send("⏳ Currently loading the next song... please wait.")
+        elif st.queue:
+            # If for some reason it's not playing but has a queue, advance manually
+            self._advance(ctx)
+            await ctx.send("⏭️ Skipped (manual advance).")
         else:
             await ctx.send("❌ Nothing is playing.")
 
@@ -224,6 +249,7 @@ class Music(commands.Cog):
         st = self.state(ctx.guild.id)
         st.queue.clear()
         st.current_title = None
+        st.is_loading = False
         if ctx.voice_client:
             await ctx.voice_client.disconnect()
         await ctx.send("⏹️ Stopped and left the channel.")
@@ -232,16 +258,21 @@ class Music(commands.Cog):
     async def queue(self, ctx):
         """Show the current queue."""
         st = self.state(ctx.guild.id)
-        if not st.current_title and not st.queue:
+        if not st.current_title and not st.queue and not st.is_loading:
             return await ctx.send("📋 Queue is empty.")
 
         lines = []
-        if st.current_title:
+        if st.is_loading:
+            lines.append("⏳ **Loading next song...**")
+        elif st.current_title:
             lines.append(f"▶️ **Now playing:** {st.current_title}")
-        for i, query in enumerate(list(st.queue)[:10], 1):
-            lines.append(f"`{i}.` {query}")
+        
+        for i, (query, title) in enumerate(list(st.queue)[:10], 1):
+            lines.append(f"`{i}.` {title}")
+        
         if len(st.queue) > 10:
             lines.append(f"… and {len(st.queue) - 10} more")
+        
         await ctx.send("\n".join(lines))
 
     @commands.command(aliases=['vol'])
@@ -258,9 +289,11 @@ class Music(commands.Cog):
     @commands.command(aliases=['np'])
     async def nowplaying(self, ctx):
         """Show the currently playing song."""
-        title = self.state(ctx.guild.id).current_title
-        if title:
-            await ctx.send(f"▶️ Now playing: **{title}**")
+        st = self.state(ctx.guild.id)
+        if st.is_loading:
+            await ctx.send("⏳ Loading next song...")
+        elif st.current_title:
+            await ctx.send(f"▶️ Now playing: **{st.current_title}**")
         else:
             await ctx.send("❌ Nothing is playing.")
 
