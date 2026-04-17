@@ -1,4 +1,5 @@
 discord.py==2.7.1
+davey
 aiohttp==3.13.3
 aiohappyeyeballs==2.6.1
 aiosignal==1.4.0
@@ -9,3 +10,5 @@ multidict==6.7.1
 propcache==0.4.1
 typing_extensions==4.15.0
 yarl==1.23.0
+yt-dlp
+PyNaCl

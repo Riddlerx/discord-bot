@@ -6,11 +6,11 @@ from dotenv import load_dotenv
 import asyncio
 import aiohttp
 import time
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, List
 import urllib.parse
 
 # Load environment variables
-load_dotenv()
+load_dotenv(override=True)
 
 # Configuration
 GUILD_CHANNEL_ID = int(os.getenv("GUILD_CHANNEL_ID", 1486759247768191018))
@@ -46,7 +46,6 @@ blizzard_token: Optional[str] = None
 blizzard_token_expiry: float = 0
 commodities_cache: Optional[Dict] = None
 commodities_cache_time: float = 0
-raider_semaphore = asyncio.Semaphore(5) # Lower concurrency to be gentler
 
 STATE_FILE = "bot_state.json"
 
@@ -77,8 +76,25 @@ load_state()
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
+intents.voice_states = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+
+def ensure_opus_loaded() -> None:
+    """Load the system Opus library required for Discord voice."""
+    if discord.opus.is_loaded():
+        return
+
+    for candidate in ("libopus.so.0", "libopus.so"):
+        try:
+            discord.opus.load_opus(candidate)
+            print(f"✅ Loaded Opus library: {candidate}")
+            return
+        except OSError:
+            continue
+
+    print("⚠️ Opus library could not be loaded. Voice playback may fail.")
 
 # ... (rest of global state)
 
@@ -143,7 +159,6 @@ async def get_item_by_id(session: aiohttp.ClientSession, item_id: int) -> Option
     if data:
         preview_item = data.get("preview_item", {})
         spells = preview_item.get("spells", [])
-        primary_spell = spells[0].get("description") if spells else None
         crafted_quality = data.get("crafted_quality")
         modified_crafting = data.get("modified_crafting") or {}
         modified_crafting_category = modified_crafting.get("category") or {}
@@ -159,7 +174,6 @@ async def get_item_by_id(session: aiohttp.ClientSession, item_id: int) -> Option
             "name": data["name"],
             "tier": tier,
             "item_level": data.get("level"),
-            "effect": primary_spell,
             "item_class_id": item_class.get("id"),
             "modified_crafting_id": modified_crafting.get("id"),
             "modified_crafting_category_id": modified_crafting_category.get("id"),
@@ -177,7 +191,6 @@ async def enrich_item_results(session: aiohttp.ClientSession, items: List[Dict])
             for key in (
                 "tier",
                 "item_level",
-                "effect",
                 "item_class_id",
                 "modified_crafting_id",
                 "modified_crafting_category_id",
@@ -815,8 +828,26 @@ async def price(ctx, *, search: str):
             embed.set_footer(text=footer_text)
             await ctx.send(embed=embed)
 
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound):
+        return
+    print(f"❌ Command Error: {error}")
+    await ctx.send(f"⚠️ Error: {error}")
+
 if __name__ == "__main__":
     if not DISCORD_BOT_TOKEN:
         print("❌ DISCORD_BOT_TOKEN not found in environment.")
     else:
-        bot.run(DISCORD_BOT_TOKEN)
+        async def main():
+            async with bot:
+                ensure_opus_loaded()
+                try:
+                    await bot.load_extension('music')
+                    print("✅ Music extension loaded")
+                except Exception as e:
+                    print(f"❌ Failed to load music extension: {e}")
+                
+                await bot.start(DISCORD_BOT_TOKEN)
+        
+        asyncio.run(main())
