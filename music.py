@@ -3,10 +3,15 @@ from discord.ext import commands
 import yt_dlp
 import asyncio
 import os
+import tempfile
+import glob
 from collections import deque
 
+TEMP_DIR = os.path.join(tempfile.gettempdir(), 'discord_music')
+os.makedirs(TEMP_DIR, exist_ok=True)
+
 YDL_OPTIONS = {
-    'format': 'bestaudio*',
+    'format': 'bestaudio[ext=webm]/bestaudio/best',  # prefer webm (smaller)
     'noplaylist': True,
     'quiet': True,
     'no_warnings': True,
@@ -18,30 +23,56 @@ YDL_OPTIONS = {
         'User-Agent': 'Mozilla/5.0',
     },
 
-    'extractor_args': {
-        'youtube': {
-            'player_client': ['web'],
-        }
-    },
-
     'js_runtimes': {'node': {}},
     'remote_components': ['ejs:github'],
-}
 
-FFMPEG_OPTIONS = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -reconnect_at_eof 1',
-    'options': '-vn -loglevel warning',
+    'outtmpl': os.path.join(TEMP_DIR, '%(id)s.%(ext)s'),
+    # Removed postprocessors — no conversion needed, FFmpeg reads any format
 }
 
 MUSIC_TEXT_CHANNEL = os.getenv("MUSIC_TEXT_CHANNEL", "music-bot")
 
 
-def fetch_info(query: str) -> dict:
+def fetch_and_download(query: str) -> dict:
+    """Search, download audio to temp file, return info dict."""
     with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
-        info = ydl.extract_info(query, download=False)
+        info = ydl.extract_info(query, download=True)
     if 'entries' in info:
         info = info['entries'][0]
     return info
+
+
+def get_audio_path(video_id: str) -> str | None:
+    """Find the downloaded audio file for a video ID."""
+    patterns = [
+        os.path.join(TEMP_DIR, f'{video_id}.opus'),
+        os.path.join(TEMP_DIR, f'{video_id}.m4a'),
+        os.path.join(TEMP_DIR, f'{video_id}.webm'),
+        os.path.join(TEMP_DIR, f'{video_id}.*'),
+    ]
+    for pattern in patterns:
+        matches = glob.glob(pattern)
+        if matches:
+            return matches[0]
+    return None
+
+
+def cleanup_file(filepath: str):
+    """Remove a temp audio file."""
+    try:
+        if filepath and os.path.exists(filepath):
+            os.remove(filepath)
+    except Exception:
+        pass
+
+
+def cleanup_all():
+    """Remove all temp audio files."""
+    for f in glob.glob(os.path.join(TEMP_DIR, '*')):
+        try:
+            os.remove(f)
+        except Exception:
+            pass
 
 
 # ── Per-guild state ────────────────────────────────────────────────────────────
@@ -50,8 +81,10 @@ class GuildState:
     def __init__(self):
         self.queue: deque[tuple[str, str]] = deque()
         self.current_title: str | None = None
+        self.current_file: str | None = None
         self.volume: float = 0.5
         self.is_loading: bool = False
+
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
 
@@ -99,16 +132,19 @@ class Music(commands.Cog):
         return True
 
     async def _play_query(self, ctx: commands.Context, query: str, title: str | None = None):
-        """Fetch audio info and start playing."""
+        """Download audio and start playing."""
         st = self.state(ctx.guild.id)
         st.is_loading = True
 
         loop = asyncio.get_event_loop()
         try:
-            info = await loop.run_in_executor(None, lambda: fetch_info(query))
-            url = info['url']
+            info = await loop.run_in_executor(None, lambda: fetch_and_download(query))
+            video_id = info.get('id', 'unknown')
             if not title:
                 title = info.get('title', 'Unknown')
+            filepath = get_audio_path(video_id)
+            if not filepath:
+                raise Exception("Download succeeded but file not found")
         except Exception as e:
             await ctx.send(f"❌ Could not load track: {e}")
             st.is_loading = False
@@ -116,16 +152,11 @@ class Music(commands.Cog):
             return
 
         st.current_title = title
+        st.current_file = filepath
         st.is_loading = False
 
-        ffmpeg_opts = FFMPEG_OPTIONS.copy()
-        ffmpeg_opts['before_options'] += (
-            ' -user_agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" '
-            '-referer "https://www.youtube.com/"'
-        )
-
         source = discord.PCMVolumeTransformer(
-            discord.FFmpegPCMAudio(url, **ffmpeg_opts),
+            discord.FFmpegPCMAudio(filepath, options='-vn'),
             volume=st.volume,
         )
         try:
@@ -134,15 +165,21 @@ class Music(commands.Cog):
                 await ctx.send(f"▶️ Now playing: **{title}**")
             else:
                 st.current_title = None
+                cleanup_file(filepath)
         except Exception as exc:
             await ctx.send(f"❌ Playback failed: {exc}")
             st.current_title = None
+            cleanup_file(filepath)
             self._advance(ctx)
 
     def _make_after_callback(self, ctx: commands.Context):
         def _after(error):
             if error:
                 print(f"❌ Voice playback error: {error}")
+            # Clean up the file that just finished playing
+            st = self.state(ctx.guild.id)
+            cleanup_file(st.current_file)
+            st.current_file = None
             self._advance(ctx)
 
         return _after
@@ -178,7 +215,17 @@ class Music(commands.Cog):
             async with ctx.typing():
                 loop = asyncio.get_event_loop()
                 try:
-                    info = await loop.run_in_executor(None, lambda: fetch_info(query))
+                    # Just search for title, don't download yet
+                    def _search(q):
+                        opts = {**YDL_OPTIONS, 'skip_download': True}
+                        del opts['outtmpl']
+                        del opts['postprocessors']
+                        with yt_dlp.YoutubeDL(opts) as ydl:
+                            info = ydl.extract_info(q, download=False)
+                        if 'entries' in info:
+                            info = info['entries'][0]
+                        return info
+                    info = await loop.run_in_executor(None, lambda: _search(query))
                     title = info.get('title', query)
                 except Exception:
                     title = query
@@ -198,7 +245,7 @@ class Music(commands.Cog):
             return await ctx.send("❌ Not connected to voice.")
 
         if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
-            ctx.voice_client.stop()
+            ctx.voice_client.stop()  # triggers _after callback which cleans up
             await ctx.send("⏭️ Skipped.")
         elif st.is_loading:
             await ctx.send("⏳ Currently loading the next song... please wait.")
@@ -231,10 +278,13 @@ class Music(commands.Cog):
         """Stop playback, clear the queue, and leave."""
         st = self.state(ctx.guild.id)
         st.queue.clear()
+        cleanup_file(st.current_file)
+        st.current_file = None
         st.current_title = None
         st.is_loading = False
         if ctx.voice_client:
             await ctx.voice_client.disconnect()
+        cleanup_all()
         await ctx.send("⏹️ Stopped and left the channel.")
 
     @commands.command(aliases=['q'])
@@ -292,10 +342,12 @@ class Music(commands.Cog):
             if vc.is_connected() and len([m for m in vc.channel.members if not m.bot]) == 0:
                 st = self.state(member.guild.id)
                 st.queue.clear()
+                cleanup_file(st.current_file)
+                st.current_file = None
                 st.current_title = None
+                cleanup_all()
                 await vc.disconnect()
 
 
 async def setup(bot):
     await bot.add_cog(Music(bot))
-
