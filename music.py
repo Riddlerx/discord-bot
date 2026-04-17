@@ -1,3 +1,8 @@
+
+
+Here's your cleaned-up file:
+
+```python
 import discord
 from discord.ext import commands
 import yt_dlp
@@ -6,7 +11,7 @@ import os
 from collections import deque
 
 YDL_OPTIONS = {
-    'format': 'bestaudio/best',
+    'format': 'bestaudio*',
     'noplaylist': True,
     'quiet': True,
     'no_warnings': True,
@@ -20,7 +25,7 @@ YDL_OPTIONS = {
 
     'extractor_args': {
         'youtube': {
-            'player_client': ['android', 'web'],
+            'player_client': ['web'],
         }
     },
 
@@ -35,28 +40,20 @@ FFMPEG_OPTIONS = {
 
 MUSIC_TEXT_CHANNEL = os.getenv("MUSIC_TEXT_CHANNEL", "music-bot")
 
+
 def fetch_info(query: str) -> dict:
-    """Blocking yt-dlp call — run in executor so it doesn't freeze the bot."""
-    import time
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
-                info = ydl.extract_info(query, download=False)
-            if 'entries' in info:
-                info = info['entries'][0]
-            return info
-        except Exception as e:
-            if attempt == max_retries - 1:
-                raise e
-            time.sleep(1)
-    return {}
+    with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
+        info = ydl.extract_info(query, download=False)
+    if 'entries' in info:
+        info = info['entries'][0]
+    return info
+
 
 # ── Per-guild state ────────────────────────────────────────────────────────────
 
 class GuildState:
     def __init__(self):
-        self.queue: deque[tuple[str, str]] = deque()  # Store (query, title)
+        self.queue: deque[tuple[str, str]] = deque()
         self.current_title: str | None = None
         self.volume: float = 0.5
         self.is_loading: bool = False
@@ -110,17 +107,13 @@ class Music(commands.Cog):
         """Fetch audio info and start playing."""
         st = self.state(ctx.guild.id)
         st.is_loading = True
-        
+
         loop = asyncio.get_event_loop()
         try:
+            info = await loop.run_in_executor(None, lambda: fetch_info(query))
+            url = info['url']
             if not title:
-                info = await loop.run_in_executor(None, lambda: fetch_info(query))
-                url = info['url']
                 title = info.get('title', 'Unknown')
-            else:
-                # If title was provided, we still need the URL
-                info = await loop.run_in_executor(None, lambda: fetch_info(query))
-                url = info['url']
         except Exception as e:
             await ctx.send(f"❌ Could not load track: {e}")
             st.is_loading = False
@@ -215,7 +208,6 @@ class Music(commands.Cog):
         elif st.is_loading:
             await ctx.send("⏳ Currently loading the next song... please wait.")
         elif st.queue:
-            # If for some reason it's not playing but has a queue, advance manually
             self._advance(ctx)
             await ctx.send("⏭️ Skipped (manual advance).")
         else:
@@ -262,13 +254,13 @@ class Music(commands.Cog):
             lines.append("⏳ **Loading next song...**")
         elif st.current_title:
             lines.append(f"▶️ **Now playing:** {st.current_title}")
-        
+
         for i, (query, title) in enumerate(list(st.queue)[:10], 1):
             lines.append(f"`{i}.` {title}")
-        
+
         if len(st.queue) > 10:
             lines.append(f"… and {len(st.queue) - 10} more")
-        
+
         await ctx.send("\n".join(lines))
 
     @commands.command(aliases=['vol'])
@@ -308,5 +300,7 @@ class Music(commands.Cog):
                 st.current_title = None
                 await vc.disconnect()
 
+
 async def setup(bot):
     await bot.add_cog(Music(bot))
+
