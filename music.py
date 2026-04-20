@@ -19,6 +19,7 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 YDL_OPTIONS_FAST = {
     'format': 'bestaudio/best',
     'noplaylist': True,
+    'default_search': 'ytsearch1',
     'js_runtimes': {'node': {}},
 }
 
