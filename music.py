@@ -14,10 +14,7 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 
 # ── yt-dlp options ─────────────────────────────────────────────────────────────
 # bgutil-ytdlp-pot-provider handles YouTube auth via PO tokens automatically.
-# Cookies are unreliable from cloud IPs (YouTube rotates them), so we don't use them by default.
-# You can enable cookies using the env vars YTDLP_COOKIES or YTDLP_COOKIES_FROM_BROWSER.
-# NOTE: YoutubeDL instances are created FRESH per extraction, not at module level,
-# to ensure the PO token plugin initialises properly in the executor thread.
+# Cookies are unreliable from cloud IPs (YouTube rotates them), so we don't use them.
 
 YDL_OPTIONS_FAST = {
     'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
@@ -30,63 +27,22 @@ YDL_OPTIONS_FAST = {
     'logtostderr': False,
     'no_color': True,
     'cachedir': False,
-    'js_runtimes': {'node': {}},
-    'user_agent': 'Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36',
-    'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
+    'lazy_extractors': True,
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['web'],
+        }
+    },
+    'js_runtimes': 'nodejs',
 }
-
-
-def _get_cookie_options() -> dict:
-    """Return yt-dlp cookie-related options from environment variables."""
-    cookie_file = os.getenv('YTDLP_COOKIES')
-    browser = os.getenv('YTDLP_COOKIES_FROM_BROWSER')
-    options: dict = {}
-    if cookie_file:
-        options['cookiefile'] = cookie_file
-    elif browser:
-        options['cookiesfrombrowser'] = browser
-    return options
-
-
-def _build_ydl_options(base_options: dict) -> dict:
-    options = dict(base_options)
-    options.update(_get_cookie_options())
-    return options
 
 YDL_OPTIONS_FALLBACK = {
     **YDL_OPTIONS_FAST,
-    'format': 'best[height<=720]',
+    'format': 'best',
 }
 
-# Additional fallback for Oracle Cloud with minimal settings
-YDL_OPTIONS_MINIMAL = {
-    'format': '18',  # Force 360p MP4 format that works without auth
-    'noplaylist': True,
-    'quiet': True,
-    'no_warnings': True,
-    'default_search': 'ytsearch1',
-    'nocheckcertificate': True,
-    'ignoreerrors': False,
-    'logtostderr': False,
-    'no_color': True,
-    'cachedir': False,
-    'js_runtimes': {'node': {}},
-    'user_agent': 'Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36',
-    'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
-}
-
-# Emergency fallback - bare minimum configuration
-YDL_OPTIONS_EMERGENCY = {
-    'format': '18',
-    'noplaylist': True,
-    'quiet': True,
-    'no_warnings': True,
-    'nocheckcertificate': True,
-    'ignoreerrors': True,  # Continue on errors
-    'user_agent': 'Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36',
-    'extractor_args': {'youtube': {'player_client': ['android']}},
-}
-
+_ydl_fast = yt_dlp.YoutubeDL(YDL_OPTIONS_FAST)
+_ydl_fallback = yt_dlp.YoutubeDL(YDL_OPTIONS_FALLBACK)
 _ydl_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="yt-dlp")
 _extract_semaphore = asyncio.Semaphore(2)
 _stream_cache: dict[str, tuple[float, dict]] = {}
@@ -139,67 +95,23 @@ async def _store_cached_info(info: dict, *keys: str | None):
                 _stream_cache[key] = (now, cached_info)
 
 
-def _sync_extract(query: str, options: dict) -> dict:
-    """Run yt-dlp extraction synchronously (called inside ThreadPoolExecutor).
-    Creates a fresh YoutubeDL instance each time so the bgutil PO token
-    plugin initialises correctly in the executor thread."""
-    with yt_dlp.YoutubeDL(options) as ydl:
-        return ydl.extract_info(query, download=False)
-
-
 async def _extract_info(query: str) -> dict:
-    """Extract info with fast options, falling back to broader format selection."""
+    """Extract info with fast client, falling back to broader format selection."""
     loop = asyncio.get_running_loop()
     async with _extract_semaphore:
         try:
             return await loop.run_in_executor(
                 _ydl_executor,
-                lambda: _sync_extract(query, _build_ydl_options(YDL_OPTIONS_FAST)),
+                lambda: _ydl_fast.extract_info(query, download=False),
             )
         except Exception as exc:
             error_text = str(exc).lower()
             if "requested format is not available" in error_text:
                 print(f"⚠️ Preferred format unavailable for '{query}', retrying with broader format...")
-                try:
-                    return await loop.run_in_executor(
-                        _ydl_executor,
-                        lambda: _sync_extract(query, _build_ydl_options(YDL_OPTIONS_FALLBACK)),
-                    )
-                except Exception as exc2:
-                    error_text2 = str(exc2).lower()
-                    if "sign in to confirm" in error_text2 or "bot" in error_text2:
-                        print(f"⚠️ Oracle Cloud auth issue for '{query}', trying minimal format...")
-                        try:
-                            return await loop.run_in_executor(
-                                _ydl_executor,
-                                lambda: _sync_extract(query, _build_ydl_options(YDL_OPTIONS_MINIMAL)),
-                            )
-                        except Exception as exc3:
-                            error_text3 = str(exc3).lower()
-                            if "sign in to confirm" in error_text3 or "bot" in error_text3:
-                                print(f"⚠️ Still failing for '{query}', trying emergency mode...")
-                                return await loop.run_in_executor(
-                                    _ydl_executor,
-                                    lambda: _sync_extract(query, _build_ydl_options(YDL_OPTIONS_EMERGENCY)),
-                                )
-                            raise
-                    raise
-            elif "sign in to confirm" in error_text or "bot" in error_text:
-                print(f"⚠️ Oracle Cloud auth issue for '{query}', trying minimal format...")
-                try:
-                    return await loop.run_in_executor(
-                        _ydl_executor,
-                        lambda: _sync_extract(query, _build_ydl_options(YDL_OPTIONS_MINIMAL)),
-                    )
-                except Exception as exc2:
-                    error_text2 = str(exc2).lower()
-                    if "sign in to confirm" in error_text2 or "bot" in error_text2:
-                        print(f"⚠️ Still failing for '{query}', trying emergency mode...")
-                        return await loop.run_in_executor(
-                            _ydl_executor,
-                            lambda: _sync_extract(query, _build_ydl_options(YDL_OPTIONS_EMERGENCY)),
-                        )
-                    raise
+                return await loop.run_in_executor(
+                    _ydl_executor,
+                    lambda: _ydl_fallback.extract_info(query, download=False),
+                )
             raise
 
 
@@ -305,16 +217,38 @@ class Music(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self._states: dict[int, GuildState] = {}
+        self._warmup_task: asyncio.Task | None = None
 
     def state(self, guild_id: int) -> GuildState:
         if guild_id not in self._states:
             self._states[guild_id] = GuildState()
         return self._states[guild_id]
 
+    async def cog_load(self):
+        self._warmup_task = asyncio.create_task(self._warmup_extractors())
+
     def cog_unload(self):
+        if self._warmup_task and not self._warmup_task.done():
+            self._warmup_task.cancel()
+
         for st in self._states.values():
             if st.prefetch_task and not st.prefetch_task.done():
                 st.prefetch_task.cancel()
+
+    async def _warmup_extractors(self):
+        try:
+            loop = asyncio.get_running_loop()
+            start = time.perf_counter()
+            await loop.run_in_executor(
+                _ydl_executor,
+                lambda: len(_ydl_fast._ies),
+            )
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            print(f"✅ Music extractors warmed in {elapsed_ms:.0f}ms")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"⚠️ Music warmup failed: {exc}")
 
     async def cog_check(self, ctx: commands.Context) -> bool:
         """Restrict music commands to one text channel per guild."""
@@ -374,19 +308,13 @@ class Music(commands.Cog):
         # If URL is missing or likely expired (old info), re-extract
         if not stream_url:
             try:
-                # Only use original_url or webpage_url, never title as fallback
-                query = info.get('original_url') or info.get('webpage_url')
-                if not query:
-                    await ctx.send(f"Could not re-extract track: No valid URL available for **{title}**")
-                    st.is_loading = False
-                    self._advance(ctx)
-                    return
+                query = info.get('original_url') or info.get('webpage_url') or info.get('title')
                 info = await get_stream_url(query, refresh=True)
                 st.current_info = info
                 stream_url = info.get('url')
                 title = info.get('title', title)
             except Exception as e:
-                await ctx.send(f"Could not re-extract track: {e}")
+                await ctx.send(f"❌ Could not re-extract track: {e}")
                 st.is_loading = False
                 self._advance(ctx)
                 return
@@ -398,7 +326,7 @@ class Music(commands.Cog):
             return
 
         # Optimized FFmpeg flags for OCI/network resilience
-        user_agent = 'Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36'
+        user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
         ffmpeg_options = {
             'before_options': f'-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 32k -analyzeduration 0 -fflags nobuffer -flags low_delay -user_agent "{user_agent}"',
             'options': '-vn -loglevel warning'
@@ -442,11 +370,7 @@ class Music(commands.Cog):
             next_track = st.queue[0]
             if not next_track.get('url'):
                 try:
-                    # Only use original_url or webpage_url, never title for prefetch
-                    query = next_track.get('original_url') or next_track.get('webpage_url')
-                    if not query:
-                        print(f"⚠️ No valid URL for prefetch, skipping")
-                        return
+                    query = next_track.get('original_url') or next_track.get('webpage_url') or next_track.get('title')
                     info = await get_stream_url(query)
                     if st.queue and st.queue[0] is next_track:
                         st.queue[0].update(info)
@@ -529,6 +453,7 @@ class Music(commands.Cog):
             return await ctx.send("❌ Not connected to voice.")
 
         if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
+            # If looping a song, temporarily disable it for manual skip
             original_loop = st.loop_mode
             if st.loop_mode == "song":
                 st.loop_mode = "off"
@@ -536,6 +461,7 @@ class Music(commands.Cog):
             ctx.voice_client.stop()
             await ctx.send("⏭️ Skipped.")
             
+            # Restore loop mode after a tiny delay so _advance sees "off" first
             if original_loop == "song":
                 await asyncio.sleep(0.5)
                 st.loop_mode = "song"
@@ -555,6 +481,7 @@ class Music(commands.Cog):
         valid_modes = ["off", "song", "queue"]
         
         if mode is None:
+            # Cycle through modes
             idx = (valid_modes.index(st.loop_mode) + 1) % len(valid_modes)
             st.loop_mode = valid_modes[idx]
         elif mode.lower() in valid_modes:
