@@ -101,7 +101,7 @@ async def _extract_info(query: str) -> dict:
     loop = asyncio.get_running_loop()
     
     # Define cookie path (hardcoded for now, can be made configurable later)
-    cookie_file_path = '/home/win-htut/discordbot/cookies.txt'
+    cookie_file_path = os.getenv('YOUTUBE_COOKIES_PATH', '/home/ubuntu/discordbot/cookies.txt')
     
     # Prepare options for the fast client
     current_ydl_options = YDL_OPTIONS_FAST.copy()
