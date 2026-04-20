@@ -471,19 +471,25 @@ class Music(commands.Cog):
     @commands.command(aliases=['p'])
     async def play(self, ctx, *, query: str):
         """Play a song or add it to the queue."""
-        if not await self._ensure_voice(ctx):
+        if ctx.voice_client is None and not ctx.author.voice:
+            await ctx.send("❌ Join a voice channel first.")
             return
 
         st = self.state(ctx.guild.id)
-        vc = ctx.voice_client
 
         async with ctx.typing():
             try:
-                info = await get_stream_url(query)
+                voice_task = asyncio.create_task(self._ensure_voice(ctx))
+                info_task = asyncio.create_task(get_stream_url(query))
+                voice_ok, info = await asyncio.gather(voice_task, info_task)
                 info['original_url'] = query  # Keep original query
             except Exception as e:
                 return await ctx.send(f"❌ Could not load track: {e}")
 
+        if not voice_ok:
+            return
+
+        vc = ctx.voice_client
         if vc.is_playing() or vc.is_paused() or st.is_loading:
             st.queue.append(info)
             self._schedule_prefetch(ctx)
