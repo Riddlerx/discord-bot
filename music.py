@@ -97,23 +97,50 @@ async def _store_cached_info(info: dict, *keys: str | None):
 
 
 async def _extract_info(query: str) -> dict:
-    """Extract info with fast client, falling back to broader format selection."""
+    """Extract info with fast client, falling back to broader format selection, with cookies."""
     loop = asyncio.get_running_loop()
+    
+    # Define cookie path (hardcoded for now, can be made configurable later)
+    cookie_file_path = '/home/ubuntu/discordbot/cookies.txt'
+    
+    # Ensure the cookie file exists
+    if not os.path.exists(cookie_file_path):
+        print(f"❌ Cookie file not found at: {cookie_file_path}")
+        raise FileNotFoundError(f"Cookie file not found: {cookie_file_path}")
+
+    # Prepare options for the fast client
+    current_ydl_options = YDL_OPTIONS_FAST.copy()
+    current_ydl_options['cookies'] = cookie_file_path
+    
     async with _extract_semaphore:
         try:
+            # Create a new YoutubeDL instance with the updated options
+            ydl = yt_dlp.YoutubeDL(current_ydl_options)
             return await loop.run_in_executor(
                 _ydl_executor,
-                lambda: _ydl_fast.extract_info(query, download=False),
+                lambda: ydl.extract_info(query, download=False),
             )
+        except FileNotFoundError as fnf_error:
+            print(f"Error: {fnf_error}")
+            raise # Re-raise to be caught by get_stream_url
         except Exception as exc:
             error_text = str(exc).lower()
             if "requested format is not available" in error_text:
                 print(f"⚠️ Preferred format unavailable for '{query}', retrying with broader format...")
+                # Prepare options for the fallback client, also using cookies
+                fallback_ydl_options = YDL_OPTIONS_FALLBACK.copy()
+                fallback_ydl_options['cookies'] = cookie_file_path
+                if not os.path.exists(fallback_ydl_options['cookies']):
+                     print(f"❌ Cookie file not found at: {fallback_ydl_options['cookies']}")
+                     raise FileNotFoundError(f"Cookie file not found: {fallback_ydl_options['cookies']}")
+                
+                ydl_fallback = yt_dlp.YoutubeDL(fallback_ydl_options)
                 return await loop.run_in_executor(
                     _ydl_executor,
-                    lambda: _ydl_fallback.extract_info(query, download=False),
+                    lambda: ydl_fallback.extract_info(query, download=False),
                 )
-            raise
+            # Re-raise other exceptions
+            raise exc
 
 
 async def get_stream_url(query: str, *, refresh: bool = False) -> dict:
