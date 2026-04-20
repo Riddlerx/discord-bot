@@ -10,33 +10,47 @@ from collections import deque
 TEMP_DIR = os.path.join(tempfile.gettempdir(), 'discord_music')
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-YDL_OPTIONS = {
+# Create two instances: one fast/unauthenticated, one authenticated with cookies
+YDL_OPTIONS_FAST = {
     'format': 'bestaudio/best',
     'noplaylist': True,
     'quiet': True,
     'no_warnings': True,
     'default_search': 'ytsearch1',
     'nocheckcertificate': True,
-    'ignoreerrors': True,
+    'ignoreerrors': False,
     'logtostderr': False,
     'no_color': True,
-    'lazy_extractors': True,
     'cachedir': False,
-    'cookiefile': os.path.join(os.path.dirname(__file__), 'cookies.txt'),
-    'http_headers': {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    },
+    'lazy_extractors': True,
 }
 
-# Persistent YDL instance to avoid re-initialization overhead (~1s save)
-_ydl = yt_dlp.YoutubeDL(YDL_OPTIONS)
+YDL_OPTIONS_AUTH = {
+    **YDL_OPTIONS_FAST,
+    'cookiefile': os.path.join(os.path.dirname(__file__), 'cookies.txt'),
+}
+
+_ydl_fast = yt_dlp.YoutubeDL(YDL_OPTIONS_FAST)
+_ydl_auth = yt_dlp.YoutubeDL(YDL_OPTIONS_AUTH)
 
 async def get_stream_url(query: str) -> dict:
-    """Search and return the direct stream URL and info asynchronously."""
+    """Search with fast/unauthenticated instance first, fallback to cookies on failure."""
     loop = asyncio.get_event_loop()
-    # Offload the blocking extract_info call to a thread to keep the event loop free
-    info = await loop.run_in_executor(None, lambda: _ydl.extract_info(query, download=False))
+    
+    # Try fast way first
+    try:
+        info = await loop.run_in_executor(None, lambda: _ydl_fast.extract_info(query, download=False))
+    except Exception:
+        # If fast fails, try with cookies
+        print(f"⚠️ Fast search failed for '{query}', retrying with cookies...")
+        info = await loop.run_in_executor(None, lambda: _ydl_auth.extract_info(query, download=False))
+
+    if not info:
+        raise Exception("Could not extract info.")
+        
     if 'entries' in info:
+        if not info['entries']:
+            raise Exception("No results found.")
         info = info['entries'][0]
     return info
 
