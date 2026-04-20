@@ -58,6 +58,23 @@ YDL_OPTIONS_FALLBACK = {
     'format': 'best[height<=720]',
 }
 
+# Additional fallback for Oracle Cloud with minimal settings
+YDL_OPTIONS_MINIMAL = {
+    'format': '18',  # Force 360p MP4 format that works without auth
+    'noplaylist': True,
+    'quiet': True,
+    'no_warnings': True,
+    'default_search': 'ytsearch1',
+    'nocheckcertificate': True,
+    'ignoreerrors': False,
+    'logtostderr': False,
+    'no_color': True,
+    'cachedir': False,
+    'js_runtimes': {'node': {}},
+    'user_agent': 'Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36',
+    'extractor_args': {'youtube': {'player_client': ['android']}},
+}
+
 _ydl_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="yt-dlp")
 _extract_semaphore = asyncio.Semaphore(2)
 _stream_cache: dict[str, tuple[float, dict]] = {}
@@ -131,9 +148,25 @@ async def _extract_info(query: str) -> dict:
             error_text = str(exc).lower()
             if "requested format is not available" in error_text:
                 print(f"⚠️ Preferred format unavailable for '{query}', retrying with broader format...")
+                try:
+                    return await loop.run_in_executor(
+                        _ydl_executor,
+                        lambda: _sync_extract(query, _build_ydl_options(YDL_OPTIONS_FALLBACK)),
+                    )
+                except Exception as exc2:
+                    error_text2 = str(exc2).lower()
+                    if "sign in to confirm" in error_text2 or "bot" in error_text2:
+                        print(f"⚠️ Oracle Cloud auth issue for '{query}', trying minimal format...")
+                        return await loop.run_in_executor(
+                            _ydl_executor,
+                            lambda: _sync_extract(query, _build_ydl_options(YDL_OPTIONS_MINIMAL)),
+                        )
+                    raise
+            elif "sign in to confirm" in error_text or "bot" in error_text:
+                print(f"⚠️ Oracle Cloud auth issue for '{query}', trying minimal format...")
                 return await loop.run_in_executor(
                     _ydl_executor,
-                    lambda: _sync_extract(query, _build_ydl_options(YDL_OPTIONS_FALLBACK)),
+                    lambda: _sync_extract(query, _build_ydl_options(YDL_OPTIONS_MINIMAL)),
                 )
             raise
 
