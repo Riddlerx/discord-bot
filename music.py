@@ -28,13 +28,14 @@ YDL_OPTIONS_FAST = {
     'no_color': True,
     'cachedir': False,
     'lazy_extractors': True,
-    'extractor_args': {
-        'youtube': {
-            'player_client': ['web'],
-        }
-    },
-    'js_runtimes': {'nodejs': {}},
-}
+    'user-agent': 'Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36',
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'web'],
+            }
+        },
+        'js_runtimes': {'nodejs': {}},
+    }
 
 YDL_OPTIONS_FALLBACK = {
     **YDL_OPTIONS_FAST,
