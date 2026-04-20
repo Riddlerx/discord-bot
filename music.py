@@ -101,7 +101,7 @@ async def _extract_info(query: str) -> dict:
     loop = asyncio.get_running_loop()
     
     # Define cookie path (hardcoded for now, can be made configurable later)
-    cookie_file_path = '/home/ubuntu/discordbot/cookies.txt'
+    cookie_file_path = '/home/win-htut/discordbot/cookies.txt'
     
     # Ensure the cookie file exists
     if not os.path.exists(cookie_file_path):
