@@ -12,9 +12,12 @@ from collections import deque
 TEMP_DIR = os.path.join(tempfile.gettempdir(), 'discord_music')
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-# Create two instances: one fast/unauthenticated, one authenticated with cookies
+# ── yt-dlp options ─────────────────────────────────────────────────────────────
+# bgutil-ytdlp-pot-provider handles YouTube auth via PO tokens automatically.
+# Cookies are unreliable from cloud IPs (YouTube rotates them), so we don't use them.
+
 YDL_OPTIONS_FAST = {
-    'format': 'bestaudio*/best',
+    'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
     'noplaylist': True,
     'quiet': True,
     'no_warnings': True,
@@ -27,14 +30,10 @@ YDL_OPTIONS_FAST = {
     'lazy_extractors': True,
     'extractor_args': {
         'youtube': {
-            'player_client': ['android', 'web'],
+            'player_client': ['web'],
         }
     },
-}
-
-YDL_OPTIONS_AUTH = {
-    **YDL_OPTIONS_FAST,
-    'cookiefile': os.path.join(os.path.dirname(__file__), 'cookies.txt'),
+    'js_runtimes': 'nodejs',
 }
 
 YDL_OPTIONS_FALLBACK = {
@@ -42,15 +41,8 @@ YDL_OPTIONS_FALLBACK = {
     'format': 'best',
 }
 
-YDL_OPTIONS_AUTH_FALLBACK = {
-    **YDL_OPTIONS_AUTH,
-    'format': 'best',
-}
-
 _ydl_fast = yt_dlp.YoutubeDL(YDL_OPTIONS_FAST)
-_ydl_auth = yt_dlp.YoutubeDL(YDL_OPTIONS_AUTH)
-_ydl_fast_fallback = yt_dlp.YoutubeDL(YDL_OPTIONS_FALLBACK)
-_ydl_auth_fallback = yt_dlp.YoutubeDL(YDL_OPTIONS_AUTH_FALLBACK)
+_ydl_fallback = yt_dlp.YoutubeDL(YDL_OPTIONS_FALLBACK)
 _ydl_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="yt-dlp")
 _extract_semaphore = asyncio.Semaphore(2)
 _stream_cache: dict[str, tuple[float, dict]] = {}
@@ -104,6 +96,7 @@ async def _store_cached_info(info: dict, *keys: str | None):
 
 
 async def _extract_info(query: str) -> dict:
+    """Extract info with fast client, falling back to broader format selection."""
     loop = asyncio.get_running_loop()
     async with _extract_semaphore:
         try:
@@ -111,33 +104,19 @@ async def _extract_info(query: str) -> dict:
                 _ydl_executor,
                 lambda: _ydl_fast.extract_info(query, download=False),
             )
-        except Exception as fast_exc:
-            print(f"⚠️ Fast search failed for '{query}', retrying with cookies...")
-            try:
+        except Exception as exc:
+            error_text = str(exc).lower()
+            if "requested format is not available" in error_text:
+                print(f"⚠️ Preferred format unavailable for '{query}', retrying with broader format...")
                 return await loop.run_in_executor(
                     _ydl_executor,
-                    lambda: _ydl_auth.extract_info(query, download=False),
+                    lambda: _ydl_fallback.extract_info(query, download=False),
                 )
-            except Exception as auth_exc:
-                error_text = f"{fast_exc} {auth_exc}".lower()
-                if "requested format is not available" not in error_text:
-                    raise auth_exc
-
-                print(f"⚠️ Preferred audio format unavailable for '{query}', retrying with broader format selection...")
-                try:
-                    return await loop.run_in_executor(
-                        _ydl_executor,
-                        lambda: _ydl_fast_fallback.extract_info(query, download=False),
-                    )
-                except Exception:
-                    return await loop.run_in_executor(
-                        _ydl_executor,
-                        lambda: _ydl_auth_fallback.extract_info(query, download=False),
-                    )
+            raise
 
 
 async def get_stream_url(query: str, *, refresh: bool = False) -> dict:
-    """Search with fast/unauthenticated instance first, fallback to cookies on failure."""
+    """Search YouTube and return stream info, with caching and dedup."""
     normalized_query = _normalize_query(query)
     cache_keys = [normalized_query]
     if not refresh:
@@ -262,7 +241,7 @@ class Music(commands.Cog):
             start = time.perf_counter()
             await loop.run_in_executor(
                 _ydl_executor,
-                lambda: (len(_ydl_fast._ies), len(_ydl_auth._ies)),
+                lambda: len(_ydl_fast._ies),
             )
             elapsed_ms = (time.perf_counter() - start) * 1000
             print(f"✅ Music extractors warmed in {elapsed_ms:.0f}ms")
@@ -329,7 +308,6 @@ class Music(commands.Cog):
         # If URL is missing or likely expired (old info), re-extract
         if not stream_url:
             try:
-                # Use original_url or webpage_url if available
                 query = info.get('original_url') or info.get('webpage_url') or info.get('title')
                 info = await get_stream_url(query, refresh=True)
                 st.current_info = info
@@ -455,7 +433,7 @@ class Music(commands.Cog):
         async with ctx.typing():
             try:
                 info = await get_stream_url(query)
-                info['original_url'] = query # Keep original query
+                info['original_url'] = query  # Keep original query
             except Exception as e:
                 return await ctx.send(f"❌ Could not load track: {e}")
 
@@ -466,7 +444,6 @@ class Music(commands.Cog):
             await ctx.send(f"📋 Added to queue (#{pos}): **{info.get('title')}**")
         else:
             await self._play_track(ctx, info, ensure_voice=False)
-
 
     @commands.command()
     async def skip(self, ctx):
@@ -523,7 +500,6 @@ class Music(commands.Cog):
             return await ctx.send("❌ Not enough songs in queue to shuffle.")
             
         import random
-        # Convert to list, shuffle, then back to deque
         temp_list = list(st.queue)
         random.shuffle(temp_list)
         st.queue = deque(temp_list)
@@ -536,13 +512,11 @@ class Music(commands.Cog):
         if index < 1 or index > len(st.queue):
             return await ctx.send(f"❌ Invalid index. Use `!q` to see song numbers.")
             
-        # Deque doesn't support direct index removal well, convert to list
         temp_list = list(st.queue)
         removed = temp_list.pop(index - 1)
         st.queue = deque(temp_list)
         
         await ctx.send(f"🗑️ Removed: **{removed.get('title')}**")
-
 
     @commands.command()
     async def pause(self, ctx):
