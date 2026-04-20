@@ -11,6 +11,7 @@ import urllib.parse
 
 # Load environment variables
 load_dotenv(override=True)
+STARTUP_MONOTONIC = time.perf_counter()
 
 # Configuration
 GUILD_CHANNEL_ID = int(os.getenv("GUILD_CHANNEL_ID", 1486759247768191018))
@@ -78,7 +79,13 @@ intents.members = True
 intents.message_content = True
 intents.voice_states = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(
+    command_prefix="!",
+    intents=intents,
+    member_cache_flags=discord.MemberCacheFlags.none(),
+    chunk_guilds_at_startup=False,
+)
+auto_update_task: Optional[asyncio.Task] = None
 
 
 def ensure_opus_loaded() -> None:
@@ -551,8 +558,13 @@ async def search_items(session: aiohttp.ClientSession, item_name: str) -> List[D
 
 @bot.event
 async def on_ready():
-    print(f"Bot connected as {bot.user}")
-    bot.loop.create_task(auto_update())
+    global auto_update_task
+
+    startup_elapsed = time.perf_counter() - STARTUP_MONOTONIC
+    print(f"Bot connected as {bot.user} in {startup_elapsed:.2f}s")
+
+    if auto_update_task is None or auto_update_task.done():
+        auto_update_task = bot.loop.create_task(auto_update())
 
 async def auto_update():
     await bot.wait_until_ready()
