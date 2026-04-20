@@ -33,12 +33,15 @@ YDL_OPTIONS = {
 MUSIC_TEXT_CHANNEL = os.getenv("MUSIC_TEXT_CHANNEL", "music-bot")
 
 
-def fetch_and_download(query: str) -> dict:
-    """Search, download audio to temp file, return info dict."""
-    with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
-        info = ydl.extract_info(query, download=True)
-    if 'entries' in info:
-        info = info['entries'][0]
+def get_stream_url(query: str) -> dict:
+    """Search and return the direct stream URL and info."""
+    opts = {**YDL_OPTIONS, 'format': 'bestaudio/best', 'skip_download': True}
+    if 'outtmpl' in opts: del opts['outtmpl']
+    if 'postprocessors' in opts: del opts['postprocessors']
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(query, download=False)
+        if 'entries' in info:
+            info = info['entries'][0]
     return info
 
 
@@ -132,54 +135,59 @@ class Music(commands.Cog):
         return True
 
     async def _play_query(self, ctx: commands.Context, query: str, title: str | None = None):
-        """Download audio and start playing."""
+        """Get stream URL and start playing using FFmpeg with optimized flags."""
         st = self.state(ctx.guild.id)
         st.is_loading = True
 
+        # NOTE: The 5s delay here is caused by YouTube URL extraction (yt-dlp). 
+        # Future optimization: Implement a pre-fetcher that extracts this URL
+        # while the current song is still playing.
+        
         loop = asyncio.get_event_loop()
         try:
-            info = await loop.run_in_executor(None, lambda: fetch_and_download(query))
-            video_id = info.get('id', 'unknown')
+            info = await loop.run_in_executor(None, lambda: get_stream_url(query))
+            stream_url = info.get('url')
             if not title:
                 title = info.get('title', 'Unknown')
-            filepath = get_audio_path(video_id)
-            if not filepath:
-                raise Exception("Download succeeded but file not found")
+            if not stream_url:
+                raise Exception("Could not extract stream URL")
         except Exception as e:
             await ctx.send(f"❌ Could not load track: {e}")
             st.is_loading = False
             self._advance(ctx)
             return
 
-        st.current_title = title
-        st.current_file = filepath
-        st.is_loading = False
+        # Optimized FFmpeg flags for OCI/network resilience
+        ffmpeg_options = {
+            'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 100M -analyzeduration 0 -fflags nobuffer -flags low_delay',
+            'options': '-vn'
+        }
 
         source = discord.PCMVolumeTransformer(
-            discord.FFmpegPCMAudio(filepath, options='-vn'),
+            discord.FFmpegPCMAudio(stream_url, **ffmpeg_options),
             volume=st.volume,
         )
+        
         try:
             if ctx.voice_client:
-                ctx.voice_client.play(source, after=self._make_after_callback(ctx))
+                st.current_title = title
+                st.is_loading = False
                 await ctx.send(f"▶️ Now playing: **{title}**")
+                ctx.voice_client.play(source, after=self._make_after_callback(ctx))
             else:
                 st.current_title = None
-                cleanup_file(filepath)
+                st.is_loading = False
         except Exception as exc:
             await ctx.send(f"❌ Playback failed: {exc}")
             st.current_title = None
-            cleanup_file(filepath)
+            st.is_loading = False
             self._advance(ctx)
 
     def _make_after_callback(self, ctx: commands.Context):
         def _after(error):
             if error:
                 print(f"❌ Voice playback error: {error}")
-            # Clean up the file that just finished playing
             st = self.state(ctx.guild.id)
-            cleanup_file(st.current_file)
-            st.current_file = None
             self._advance(ctx)
 
         return _after
@@ -278,13 +286,10 @@ class Music(commands.Cog):
         """Stop playback, clear the queue, and leave."""
         st = self.state(ctx.guild.id)
         st.queue.clear()
-        cleanup_file(st.current_file)
-        st.current_file = None
         st.current_title = None
         st.is_loading = False
         if ctx.voice_client:
             await ctx.voice_client.disconnect()
-        cleanup_all()
         await ctx.send("⏹️ Stopped and left the channel.")
 
     @commands.command(aliases=['q'])
@@ -342,10 +347,7 @@ class Music(commands.Cog):
             if vc.is_connected() and len([m for m in vc.channel.members if not m.bot]) == 0:
                 st = self.state(member.guild.id)
                 st.queue.clear()
-                cleanup_file(st.current_file)
-                st.current_file = None
                 st.current_title = None
-                cleanup_all()
                 await vc.disconnect()
 
 
