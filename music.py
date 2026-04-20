@@ -72,6 +72,18 @@ YDL_OPTIONS_MINIMAL = {
     'cachedir': False,
     'js_runtimes': {'node': {}},
     'user_agent': 'Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36',
+    'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
+}
+
+# Emergency fallback - bare minimum configuration
+YDL_OPTIONS_EMERGENCY = {
+    'format': '18',
+    'noplaylist': True,
+    'quiet': True,
+    'no_warnings': True,
+    'nocheckcertificate': True,
+    'ignoreerrors': True,  # Continue on errors
+    'user_agent': 'Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36',
     'extractor_args': {'youtube': {'player_client': ['android']}},
 }
 
@@ -157,17 +169,37 @@ async def _extract_info(query: str) -> dict:
                     error_text2 = str(exc2).lower()
                     if "sign in to confirm" in error_text2 or "bot" in error_text2:
                         print(f"⚠️ Oracle Cloud auth issue for '{query}', trying minimal format...")
-                        return await loop.run_in_executor(
-                            _ydl_executor,
-                            lambda: _sync_extract(query, _build_ydl_options(YDL_OPTIONS_MINIMAL)),
-                        )
+                        try:
+                            return await loop.run_in_executor(
+                                _ydl_executor,
+                                lambda: _sync_extract(query, _build_ydl_options(YDL_OPTIONS_MINIMAL)),
+                            )
+                        except Exception as exc3:
+                            error_text3 = str(exc3).lower()
+                            if "sign in to confirm" in error_text3 or "bot" in error_text3:
+                                print(f"⚠️ Still failing for '{query}', trying emergency mode...")
+                                return await loop.run_in_executor(
+                                    _ydl_executor,
+                                    lambda: _sync_extract(query, _build_ydl_options(YDL_OPTIONS_EMERGENCY)),
+                                )
+                            raise
                     raise
             elif "sign in to confirm" in error_text or "bot" in error_text:
                 print(f"⚠️ Oracle Cloud auth issue for '{query}', trying minimal format...")
-                return await loop.run_in_executor(
-                    _ydl_executor,
-                    lambda: _sync_extract(query, _build_ydl_options(YDL_OPTIONS_MINIMAL)),
-                )
+                try:
+                    return await loop.run_in_executor(
+                        _ydl_executor,
+                        lambda: _sync_extract(query, _build_ydl_options(YDL_OPTIONS_MINIMAL)),
+                    )
+                except Exception as exc2:
+                    error_text2 = str(exc2).lower()
+                    if "sign in to confirm" in error_text2 or "bot" in error_text2:
+                        print(f"⚠️ Still failing for '{query}', trying emergency mode...")
+                        return await loop.run_in_executor(
+                            _ydl_executor,
+                            lambda: _sync_extract(query, _build_ydl_options(YDL_OPTIONS_EMERGENCY)),
+                        )
+                    raise
             raise
 
 
