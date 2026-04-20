@@ -374,13 +374,19 @@ class Music(commands.Cog):
         # If URL is missing or likely expired (old info), re-extract
         if not stream_url:
             try:
-                query = info.get('original_url') or info.get('webpage_url') or info.get('title')
+                # Only use original_url or webpage_url, never title as fallback
+                query = info.get('original_url') or info.get('webpage_url')
+                if not query:
+                    await ctx.send(f"Could not re-extract track: No valid URL available for **{title}**")
+                    st.is_loading = False
+                    self._advance(ctx)
+                    return
                 info = await get_stream_url(query, refresh=True)
                 st.current_info = info
                 stream_url = info.get('url')
                 title = info.get('title', title)
             except Exception as e:
-                await ctx.send(f"❌ Could not re-extract track: {e}")
+                await ctx.send(f"Could not re-extract track: {e}")
                 st.is_loading = False
                 self._advance(ctx)
                 return
