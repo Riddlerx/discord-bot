@@ -17,7 +17,7 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 # Support explicit yt-dlp auth config so the bot can run both locally and on servers.
 
 YDL_OPTIONS_FAST = {
-    'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
+    'format': 'bestaudio/best',
     'noplaylist': True,
     'quiet': True,
     'no_warnings': True,
@@ -29,13 +29,7 @@ YDL_OPTIONS_FAST = {
     'cachedir': False,
     'lazy_extractors': True,
     'user-agent': 'Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36',
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'web'],
-            }
-        },
-        'js_runtimes': {'nodejs': {}},
-    }
+}
 
 YDL_OPTIONS_FALLBACK = {
     **YDL_OPTIONS_FAST,
