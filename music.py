@@ -14,7 +14,7 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 
 # Create two instances: one fast/unauthenticated, one authenticated with cookies
 YDL_OPTIONS_FAST = {
-    'format': 'bestaudio/best',
+    'format': 'bestaudio*/best',
     'noplaylist': True,
     'quiet': True,
     'no_warnings': True,
@@ -25,6 +25,11 @@ YDL_OPTIONS_FAST = {
     'no_color': True,
     'cachedir': False,
     'lazy_extractors': True,
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['android', 'web'],
+        }
+    },
 }
 
 YDL_OPTIONS_AUTH = {
@@ -32,8 +37,20 @@ YDL_OPTIONS_AUTH = {
     'cookiefile': os.path.join(os.path.dirname(__file__), 'cookies.txt'),
 }
 
+YDL_OPTIONS_FALLBACK = {
+    **YDL_OPTIONS_FAST,
+    'format': 'best',
+}
+
+YDL_OPTIONS_AUTH_FALLBACK = {
+    **YDL_OPTIONS_AUTH,
+    'format': 'best',
+}
+
 _ydl_fast = yt_dlp.YoutubeDL(YDL_OPTIONS_FAST)
 _ydl_auth = yt_dlp.YoutubeDL(YDL_OPTIONS_AUTH)
+_ydl_fast_fallback = yt_dlp.YoutubeDL(YDL_OPTIONS_FALLBACK)
+_ydl_auth_fallback = yt_dlp.YoutubeDL(YDL_OPTIONS_AUTH_FALLBACK)
 _ydl_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="yt-dlp")
 _extract_semaphore = asyncio.Semaphore(2)
 _stream_cache: dict[str, tuple[float, dict]] = {}
@@ -94,12 +111,29 @@ async def _extract_info(query: str) -> dict:
                 _ydl_executor,
                 lambda: _ydl_fast.extract_info(query, download=False),
             )
-        except Exception:
+        except Exception as fast_exc:
             print(f"⚠️ Fast search failed for '{query}', retrying with cookies...")
-            return await loop.run_in_executor(
-                _ydl_executor,
-                lambda: _ydl_auth.extract_info(query, download=False),
-            )
+            try:
+                return await loop.run_in_executor(
+                    _ydl_executor,
+                    lambda: _ydl_auth.extract_info(query, download=False),
+                )
+            except Exception as auth_exc:
+                error_text = f"{fast_exc} {auth_exc}".lower()
+                if "requested format is not available" not in error_text:
+                    raise auth_exc
+
+                print(f"⚠️ Preferred audio format unavailable for '{query}', retrying with broader format selection...")
+                try:
+                    return await loop.run_in_executor(
+                        _ydl_executor,
+                        lambda: _ydl_fast_fallback.extract_info(query, download=False),
+                    )
+                except Exception:
+                    return await loop.run_in_executor(
+                        _ydl_executor,
+                        lambda: _ydl_auth_fallback.extract_info(query, download=False),
+                    )
 
 
 async def get_stream_url(query: str, *, refresh: bool = False) -> dict:
