@@ -14,7 +14,8 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 
 # ── yt-dlp options ─────────────────────────────────────────────────────────────
 # bgutil-ytdlp-pot-provider handles YouTube auth via PO tokens automatically.
-# Cookies are unreliable from cloud IPs (YouTube rotates them), so we don't use them.
+# Cookies are unreliable from cloud IPs (YouTube rotates them), so we don't use them by default.
+# You can enable cookies using the env vars YTDLP_COOKIES or YTDLP_COOKIES_FROM_BROWSER.
 # NOTE: YoutubeDL instances are created FRESH per extraction, not at module level,
 # to ensure the PO token plugin initialises properly in the executor thread.
 
@@ -31,7 +32,26 @@ YDL_OPTIONS_FAST = {
     'cachedir': False,
     'js_runtimes': {'node': {}},
     'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+    'extractor_args': {'youtube': {'player_client': ['android']}},
 }
+
+
+def _get_cookie_options() -> dict:
+    """Return yt-dlp cookie-related options from environment variables."""
+    cookie_file = os.getenv('YTDLP_COOKIES')
+    browser = os.getenv('YTDLP_COOKIES_FROM_BROWSER')
+    options: dict = {}
+    if cookie_file:
+        options['cookiefile'] = cookie_file
+    elif browser:
+        options['cookiesfrombrowser'] = browser
+    return options
+
+
+def _build_ydl_options(base_options: dict) -> dict:
+    options = dict(base_options)
+    options.update(_get_cookie_options())
+    return options
 
 YDL_OPTIONS_FALLBACK = {
     **YDL_OPTIONS_FAST,
@@ -105,7 +125,7 @@ async def _extract_info(query: str) -> dict:
         try:
             return await loop.run_in_executor(
                 _ydl_executor,
-                lambda: _sync_extract(query, YDL_OPTIONS_FAST),
+                lambda: _sync_extract(query, _build_ydl_options(YDL_OPTIONS_FAST)),
             )
         except Exception as exc:
             error_text = str(exc).lower()
@@ -113,7 +133,7 @@ async def _extract_info(query: str) -> dict:
                 print(f"⚠️ Preferred format unavailable for '{query}', retrying with broader format...")
                 return await loop.run_in_executor(
                     _ydl_executor,
-                    lambda: _sync_extract(query, YDL_OPTIONS_FALLBACK),
+                    lambda: _sync_extract(query, _build_ydl_options(YDL_OPTIONS_FALLBACK)),
                 )
             raise
 
