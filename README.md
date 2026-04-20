@@ -12,3 +12,19 @@ Example:
 ```bash
 export YTDLP_COOKIES=/path/to/youtube_cookies.txt
 ```
+
+## Oracle Cloud note
+
+This happens much more often on Oracle Cloud public IPs than on a local machine. In practice:
+
+- `YTDLP_COOKIES` is the reliable server-side option
+- `YTDLP_COOKIES_FROM_BROWSER` is mostly useful on a desktop/laptop that already has your browser profile
+
+Recommended flow for OCI:
+
+1. On your local computer, export YouTube cookies in `cookies.txt` format.
+2. Copy that file to the server, for example to `/home/ubuntu/discordbot/cookies.txt`.
+3. Set `YTDLP_COOKIES=/home/ubuntu/discordbot/cookies.txt` in the bot environment.
+4. Restart the bot process.
+
+If the error returns later, re-export the cookies. YouTube cookies can expire or become invalid after account/security changes.

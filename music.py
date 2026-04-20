@@ -13,8 +13,8 @@ TEMP_DIR = os.path.join(tempfile.gettempdir(), 'discord_music')
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 # ── yt-dlp options ─────────────────────────────────────────────────────────────
-# bgutil-ytdlp-pot-provider handles YouTube auth via PO tokens automatically.
-# Cookies are unreliable from cloud IPs (YouTube rotates them), so we don't use them.
+# Oracle/OCI IP ranges are challenged by YouTube more often than residential IPs.
+# Support explicit yt-dlp auth config so the bot can run both locally and on servers.
 
 YDL_OPTIONS_FAST = {
     'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
@@ -51,6 +51,34 @@ _stream_cache_lock = asyncio.Lock()
 _inflight_queries: dict[str, asyncio.Future] = {}
 _inflight_queries_lock = asyncio.Lock()
 _STREAM_CACHE_TTL = 900
+
+
+def _get_yt_dlp_auth_config() -> dict:
+    """Return yt-dlp auth-related options from environment variables."""
+    cookies_path = os.getenv("YTDLP_COOKIES") or os.getenv("YOUTUBE_COOKIES_PATH")
+    cookies_from_browser = os.getenv("YTDLP_COOKIES_FROM_BROWSER")
+    auth_options: dict = {}
+
+    if cookies_path:
+        if not os.path.exists(cookies_path):
+            raise FileNotFoundError(
+                f"yt-dlp cookie file not found: {cookies_path}. "
+                "Set YTDLP_COOKIES to a valid exported YouTube cookies.txt file."
+            )
+        auth_options["cookiefile"] = cookies_path
+
+    if cookies_from_browser:
+        auth_options["cookiesfrombrowser"] = (cookies_from_browser,)
+
+    return auth_options
+
+
+def _build_ydl_options(base_options: dict) -> dict:
+    """Clone base yt-dlp options and apply auth configuration."""
+    return {
+        **base_options,
+        **_get_yt_dlp_auth_config(),
+    }
 
 
 def _normalize_query(value: str | None) -> str | None:
@@ -97,44 +125,45 @@ async def _store_cached_info(info: dict, *keys: str | None):
 
 
 async def _extract_info(query: str) -> dict:
-    """Extract info with fast client, falling back to broader format selection, with cookies."""
+    """Extract info with fast client, falling back to broader format selection."""
     loop = asyncio.get_running_loop()
-    
-    # Define cookie path (hardcoded for now, can be made configurable later)
-    cookie_file_path = os.getenv('YOUTUBE_COOKIES_PATH', '/home/ubuntu/discordbot/cookies.txt')
-    
-    # Prepare options for the fast client
-    current_ydl_options = YDL_OPTIONS_FAST.copy()
-    current_ydl_options['cookies'] = cookie_file_path
-    
+    auth_configured = bool(
+        os.getenv("YTDLP_COOKIES")
+        or os.getenv("YTDLP_COOKIES_FROM_BROWSER")
+        or os.getenv("YOUTUBE_COOKIES_PATH")
+    )
+
     async with _extract_semaphore:
         try:
-            # Create a new YoutubeDL instance with the updated options
-            ydl = yt_dlp.YoutubeDL(current_ydl_options)
+            ydl = yt_dlp.YoutubeDL(_build_ydl_options(YDL_OPTIONS_FAST))
             return await loop.run_in_executor(
                 _ydl_executor,
                 lambda: ydl.extract_info(query, download=False),
             )
         except FileNotFoundError as fnf_error:
             print(f"Error: {fnf_error}")
-            raise # Re-raise to be caught by get_stream_url
+            raise
         except Exception as exc:
             error_text = str(exc).lower()
             if "requested format is not available" in error_text:
                 print(f"⚠️ Preferred format unavailable for '{query}', retrying with broader format...")
-                # Prepare options for the fallback client, also using cookies
-                fallback_ydl_options = YDL_OPTIONS_FALLBACK.copy()
-                fallback_ydl_options['cookies'] = cookie_file_path
-                if not os.path.exists(fallback_ydl_options['cookies']):
-                     print(f"❌ Cookie file not found at: {fallback_ydl_options['cookies']}")
-                     raise FileNotFoundError(f"Cookie file not found: {fallback_ydl_options['cookies']}")
-                
-                ydl_fallback = yt_dlp.YoutubeDL(fallback_ydl_options)
+                ydl_fallback = yt_dlp.YoutubeDL(_build_ydl_options(YDL_OPTIONS_FALLBACK))
                 return await loop.run_in_executor(
                     _ydl_executor,
                     lambda: ydl_fallback.extract_info(query, download=False),
                 )
-            # Re-raise other exceptions
+
+            if "sign in to confirm you’re not a bot" in error_text or "sign in to confirm you're not a bot" in error_text:
+                if not auth_configured:
+                    raise RuntimeError(
+                        "YouTube blocked this server IP. Configure yt-dlp authentication on the host by "
+                        "setting YTDLP_COOKIES=/path/to/cookies.txt, then restart the bot. "
+                        "YTDLP_COOKIES_FROM_BROWSER is mainly useful on machines that already have a local browser profile."
+                    ) from exc
+                raise RuntimeError(
+                    "YouTube rejected the configured authentication. The cookie file is likely expired or invalid for this host."
+                ) from exc
+
             raise exc
 
 
