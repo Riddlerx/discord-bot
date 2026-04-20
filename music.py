@@ -32,6 +32,7 @@ YDL_OPTIONS_FAST = {
     'js_runtimes': {'node': {}},
     'extractor_args': {'youtube': {'player_client': ['android']}},
     'cookiefile': 'cookies.txt' if os.path.exists('cookies.txt') else None,
+    'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
 }
 
 YDL_OPTIONS_FALLBACK = {
