@@ -15,6 +15,8 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 # ── yt-dlp options ─────────────────────────────────────────────────────────────
 # bgutil-ytdlp-pot-provider handles YouTube auth via PO tokens automatically.
 # Cookies are unreliable from cloud IPs (YouTube rotates them), so we don't use them.
+# NOTE: YoutubeDL instances are created FRESH per extraction, not at module level,
+# to ensure the PO token plugin initialises properly in the executor thread.
 
 YDL_OPTIONS_FAST = {
     'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
@@ -27,13 +29,8 @@ YDL_OPTIONS_FAST = {
     'logtostderr': False,
     'no_color': True,
     'cachedir': False,
-    'lazy_extractors': True,
-    'extractor_args': {
-        'youtube': {
-            'player_client': ['web'],
-        }
-    },
-    'js_runtimes': 'nodejs',
+    'js_runtimes': {'node': {}},
+    'extractor_args': {'youtube': {'player_client': ['android']}},
 }
 
 YDL_OPTIONS_FALLBACK = {
@@ -41,8 +38,6 @@ YDL_OPTIONS_FALLBACK = {
     'format': 'best',
 }
 
-_ydl_fast = yt_dlp.YoutubeDL(YDL_OPTIONS_FAST)
-_ydl_fallback = yt_dlp.YoutubeDL(YDL_OPTIONS_FALLBACK)
 _ydl_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="yt-dlp")
 _extract_semaphore = asyncio.Semaphore(2)
 _stream_cache: dict[str, tuple[float, dict]] = {}
@@ -95,14 +90,22 @@ async def _store_cached_info(info: dict, *keys: str | None):
                 _stream_cache[key] = (now, cached_info)
 
 
+def _sync_extract(query: str, options: dict) -> dict:
+    """Run yt-dlp extraction synchronously (called inside ThreadPoolExecutor).
+    Creates a fresh YoutubeDL instance each time so the bgutil PO token
+    plugin initialises correctly in the executor thread."""
+    with yt_dlp.YoutubeDL(options) as ydl:
+        return ydl.extract_info(query, download=False)
+
+
 async def _extract_info(query: str) -> dict:
-    """Extract info with fast client, falling back to broader format selection."""
+    """Extract info with fast options, falling back to broader format selection."""
     loop = asyncio.get_running_loop()
     async with _extract_semaphore:
         try:
             return await loop.run_in_executor(
                 _ydl_executor,
-                lambda: _ydl_fast.extract_info(query, download=False),
+                lambda: _sync_extract(query, YDL_OPTIONS_FAST),
             )
         except Exception as exc:
             error_text = str(exc).lower()
@@ -110,7 +113,7 @@ async def _extract_info(query: str) -> dict:
                 print(f"⚠️ Preferred format unavailable for '{query}', retrying with broader format...")
                 return await loop.run_in_executor(
                     _ydl_executor,
-                    lambda: _ydl_fallback.extract_info(query, download=False),
+                    lambda: _sync_extract(query, YDL_OPTIONS_FALLBACK),
                 )
             raise
 
@@ -217,38 +220,16 @@ class Music(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self._states: dict[int, GuildState] = {}
-        self._warmup_task: asyncio.Task | None = None
 
     def state(self, guild_id: int) -> GuildState:
         if guild_id not in self._states:
             self._states[guild_id] = GuildState()
         return self._states[guild_id]
 
-    async def cog_load(self):
-        self._warmup_task = asyncio.create_task(self._warmup_extractors())
-
     def cog_unload(self):
-        if self._warmup_task and not self._warmup_task.done():
-            self._warmup_task.cancel()
-
         for st in self._states.values():
             if st.prefetch_task and not st.prefetch_task.done():
                 st.prefetch_task.cancel()
-
-    async def _warmup_extractors(self):
-        try:
-            loop = asyncio.get_running_loop()
-            start = time.perf_counter()
-            await loop.run_in_executor(
-                _ydl_executor,
-                lambda: len(_ydl_fast._ies),
-            )
-            elapsed_ms = (time.perf_counter() - start) * 1000
-            print(f"✅ Music extractors warmed in {elapsed_ms:.0f}ms")
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            print(f"⚠️ Music warmup failed: {exc}")
 
     async def cog_check(self, ctx: commands.Context) -> bool:
         """Restrict music commands to one text channel per guild."""
@@ -453,7 +434,6 @@ class Music(commands.Cog):
             return await ctx.send("❌ Not connected to voice.")
 
         if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
-            # If looping a song, temporarily disable it for manual skip
             original_loop = st.loop_mode
             if st.loop_mode == "song":
                 st.loop_mode = "off"
@@ -461,7 +441,6 @@ class Music(commands.Cog):
             ctx.voice_client.stop()
             await ctx.send("⏭️ Skipped.")
             
-            # Restore loop mode after a tiny delay so _advance sees "off" first
             if original_loop == "song":
                 await asyncio.sleep(0.5)
                 st.loop_mode = "song"
@@ -481,7 +460,6 @@ class Music(commands.Cog):
         valid_modes = ["off", "song", "queue"]
         
         if mode is None:
-            # Cycle through modes
             idx = (valid_modes.index(st.loop_mode) + 1) % len(valid_modes)
             st.loop_mode = valid_modes[idx]
         elif mode.lower() in valid_modes:
