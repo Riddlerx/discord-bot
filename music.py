@@ -37,6 +37,7 @@ _stream_cache_lock = asyncio.Lock()
 _inflight_queries: dict[str, asyncio.Future] = {}
 _inflight_queries_lock = asyncio.Lock()
 _STREAM_CACHE_TTL = 3600
+_STARTUP_WARMUP_DELAY = 45
 
 
 def _get_yt_dlp_auth_config() -> dict:
@@ -276,6 +277,7 @@ class Music(commands.Cog):
 
     async def _warmup_extractors(self):
         try:
+            await asyncio.sleep(_STARTUP_WARMUP_DELAY)
             loop = asyncio.get_running_loop()
             start = time.perf_counter()
             await loop.run_in_executor(
