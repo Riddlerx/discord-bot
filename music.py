@@ -36,7 +36,7 @@ _stream_cache: dict[str, tuple[float, dict]] = {}
 _stream_cache_lock = asyncio.Lock()
 _inflight_queries: dict[str, asyncio.Future] = {}
 _inflight_queries_lock = asyncio.Lock()
-_STREAM_CACHE_TTL = 900
+_STREAM_CACHE_TTL = 3600
 
 
 def _get_yt_dlp_auth_config() -> dict:
@@ -282,8 +282,14 @@ class Music(commands.Cog):
                 _ydl_executor,
                 lambda: len(_ydl_fast._ies),
             )
+            await loop.run_in_executor(
+                _ydl_executor,
+                lambda: yt_dlp.YoutubeDL(_build_ydl_options(YDL_OPTIONS_FAST)).extract_info(
+                    "ytsearch1:youtube", download=False
+                ),
+            )
             elapsed_ms = (time.perf_counter() - start) * 1000
-            print(f"✅ Music extractors warmed in {elapsed_ms:.0f}ms")
+            print(f"✅ Music extractors and YouTube path warmed in {elapsed_ms:.0f}ms")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
