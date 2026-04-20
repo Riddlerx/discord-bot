@@ -103,11 +103,6 @@ async def _extract_info(query: str) -> dict:
     # Define cookie path (hardcoded for now, can be made configurable later)
     cookie_file_path = '/home/win-htut/discordbot/cookies.txt'
     
-    # Ensure the cookie file exists
-    if not os.path.exists(cookie_file_path):
-        print(f"❌ Cookie file not found at: {cookie_file_path}")
-        raise FileNotFoundError(f"Cookie file not found: {cookie_file_path}")
-
     # Prepare options for the fast client
     current_ydl_options = YDL_OPTIONS_FAST.copy()
     current_ydl_options['cookies'] = cookie_file_path
@@ -141,6 +136,7 @@ async def _extract_info(query: str) -> dict:
                 )
             # Re-raise other exceptions
             raise exc
+
 
 
 async def get_stream_url(query: str, *, refresh: bool = False) -> dict:
