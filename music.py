@@ -33,7 +33,7 @@ YDL_OPTIONS_FAST = {
             'player_client': ['web'],
         }
     },
-    'js_runtimes': 'nodejs',
+    'js_runtimes': {'nodejs': {}},
 }
 
 YDL_OPTIONS_FALLBACK = {
