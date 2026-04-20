@@ -19,16 +19,6 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 YDL_OPTIONS_FAST = {
     'format': 'bestaudio/best',
     'noplaylist': True,
-    'quiet': True,
-    'no_warnings': True,
-    'default_search': 'ytsearch1',
-    'nocheckcertificate': True,
-    'ignoreerrors': False,
-    'logtostderr': False,
-    'no_color': True,
-    'cachedir': False,
-    'lazy_extractors': True,
-    'user-agent': 'Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36',
     'js_runtimes': {'node': {}},
 }
 
