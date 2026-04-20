@@ -11,11 +11,12 @@ TEMP_DIR = os.path.join(tempfile.gettempdir(), 'discord_music')
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 YDL_OPTIONS = {
-    'format': 'bestaudio[ext=webm]/bestaudio/best',  # prefer webm (smaller)
+    'format': 'bestaudio[ext=webm][abr<=128]/bestaudio[abr<=128]/bestaudio/best',
     'noplaylist': True,
     'quiet': True,
     'no_warnings': True,
     'default_search': 'ytsearch',
+    'lazy_extractors': True,
 
     'cookiefile': os.path.join(os.path.dirname(__file__), 'cookies.txt'),
 
@@ -27,7 +28,6 @@ YDL_OPTIONS = {
     'remote_components': ['ejs:github'],
 
     'outtmpl': os.path.join(TEMP_DIR, '%(id)s.%(ext)s'),
-    # Removed postprocessors — no conversion needed, FFmpeg reads any format
 }
 
 MUSIC_TEXT_CHANNEL = os.getenv("MUSIC_TEXT_CHANNEL", "music-bot")
@@ -35,7 +35,7 @@ MUSIC_TEXT_CHANNEL = os.getenv("MUSIC_TEXT_CHANNEL", "music-bot")
 
 def get_stream_url(query: str) -> dict:
     """Search and return the direct stream URL and info."""
-    opts = {**YDL_OPTIONS, 'format': 'bestaudio/best', 'skip_download': True}
+    opts = {**YDL_OPTIONS, 'skip_download': True}
     if 'outtmpl' in opts: del opts['outtmpl']
     if 'postprocessors' in opts: del opts['postprocessors']
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -82,7 +82,7 @@ def cleanup_all():
 
 class GuildState:
     def __init__(self):
-        self.queue: deque[tuple[str, str]] = deque()
+        self.queue: deque[dict] = deque()  # stores full info dicts
         self.current_title: str | None = None
         self.current_file: str | None = None
         self.volume: float = 0.5
@@ -134,32 +134,38 @@ class Music(commands.Cog):
             return False
         return True
 
-    async def _play_query(self, ctx: commands.Context, query: str, title: str | None = None):
-        """Get stream URL and start playing using FFmpeg with optimized flags."""
+    async def _play_track(self, ctx: commands.Context, info: dict):
+        """Start playing a track using extracted info."""
         st = self.state(ctx.guild.id)
         st.is_loading = True
 
-        # NOTE: The 5s delay here is caused by YouTube URL extraction (yt-dlp). 
-        # Future optimization: Implement a pre-fetcher that extracts this URL
-        # while the current song is still playing.
+        title = info.get('title', 'Unknown')
+        stream_url = info.get('url')
         
-        loop = asyncio.get_event_loop()
-        try:
-            info = await loop.run_in_executor(None, lambda: get_stream_url(query))
-            stream_url = info.get('url')
-            if not title:
-                title = info.get('title', 'Unknown')
-            if not stream_url:
-                raise Exception("Could not extract stream URL")
-        except Exception as e:
-            await ctx.send(f"❌ Could not load track: {e}")
+        # If URL is missing or likely expired (old info), re-extract
+        if not stream_url:
+            loop = asyncio.get_event_loop()
+            try:
+                # Use original_url or webpage_url if available
+                query = info.get('original_url') or info.get('webpage_url') or info.get('title')
+                info = await loop.run_in_executor(None, lambda: get_stream_url(query))
+                stream_url = info.get('url')
+                title = info.get('title', title)
+            except Exception as e:
+                await ctx.send(f"❌ Could not re-extract track: {e}")
+                st.is_loading = False
+                self._advance(ctx)
+                return
+
+        if not stream_url:
+            await ctx.send(f"❌ Could not extract stream URL for **{title}**")
             st.is_loading = False
             self._advance(ctx)
             return
 
         # Optimized FFmpeg flags for OCI/network resilience
         ffmpeg_options = {
-            'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 100M -analyzeduration 0 -fflags nobuffer -flags low_delay',
+            'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 32k -analyzeduration 0 -fflags nobuffer -flags low_delay',
             'options': '-vn'
         }
 
@@ -174,6 +180,9 @@ class Music(commands.Cog):
                 st.is_loading = False
                 await ctx.send(f"▶️ Now playing: **{title}**")
                 ctx.voice_client.play(source, after=self._make_after_callback(ctx))
+                
+                # Start pre-fetching the next track if available
+                self.bot.loop.create_task(self._prefetch_next(ctx))
             else:
                 st.current_title = None
                 st.is_loading = False
@@ -183,11 +192,28 @@ class Music(commands.Cog):
             st.is_loading = False
             self._advance(ctx)
 
+    async def _prefetch_next(self, ctx: commands.Context):
+        """Extract info for the next track in queue while current is playing."""
+        st = self.state(ctx.guild.id)
+        if not st.queue:
+            return
+            
+        next_track = st.queue[0]
+        # If it's just a placeholder or doesn't have a direct URL, extract it
+        if not next_track.get('url'):
+            loop = asyncio.get_event_loop()
+            try:
+                query = next_track.get('original_url') or next_track.get('title')
+                info = await loop.run_in_executor(None, lambda: get_stream_url(query))
+                st.queue[0].update(info)
+                print(f"✅ Prefetched: {info.get('title')}")
+            except Exception as e:
+                print(f"⚠️ Prefetch failed: {e}")
+
     def _make_after_callback(self, ctx: commands.Context):
         def _after(error):
             if error:
                 print(f"❌ Voice playback error: {error}")
-            st = self.state(ctx.guild.id)
             self._advance(ctx)
 
         return _after
@@ -196,9 +222,9 @@ class Music(commands.Cog):
         """Called when a track ends — pops the next item from the queue."""
         st = self.state(ctx.guild.id)
         if st.queue:
-            query, title = st.queue.popleft()
+            info = st.queue.popleft()
             asyncio.run_coroutine_threadsafe(
-                self._play_query(ctx, query, title), self.bot.loop
+                self._play_track(ctx, info), self.bot.loop
             )
         else:
             st.current_title = None
@@ -219,31 +245,21 @@ class Music(commands.Cog):
         st = self.state(ctx.guild.id)
         vc = ctx.voice_client
 
-        if vc.is_playing() or vc.is_paused() or st.is_loading:
-            async with ctx.typing():
-                loop = asyncio.get_event_loop()
-                try:
-                    # Just search for title, don't download yet
-                    def _search(q):
-                        opts = {**YDL_OPTIONS, 'skip_download': True}
-                        del opts['outtmpl']
-                        del opts['postprocessors']
-                        with yt_dlp.YoutubeDL(opts) as ydl:
-                            info = ydl.extract_info(q, download=False)
-                        if 'entries' in info:
-                            info = info['entries'][0]
-                        return info
-                    info = await loop.run_in_executor(None, lambda: _search(query))
-                    title = info.get('title', query)
-                except Exception:
-                    title = query
+        async with ctx.typing():
+            loop = asyncio.get_event_loop()
+            try:
+                info = await loop.run_in_executor(None, lambda: get_stream_url(query))
+                info['original_url'] = query # Keep original query
+            except Exception as e:
+                return await ctx.send(f"❌ Could not load track: {e}")
 
-            st.queue.append((query, title))
+        if vc.is_playing() or vc.is_paused() or st.is_loading:
+            st.queue.append(info)
             pos = len(st.queue)
-            await ctx.send(f"📋 Added to queue (#{pos}): **{title}**")
+            await ctx.send(f"📋 Added to queue (#{pos}): **{info.get('title')}**")
         else:
-            async with ctx.typing():
-                await self._play_query(ctx, query)
+            await self._play_track(ctx, info)
+
 
     @commands.command()
     async def skip(self, ctx):
@@ -305,7 +321,8 @@ class Music(commands.Cog):
         elif st.current_title:
             lines.append(f"▶️ **Now playing:** {st.current_title}")
 
-        for i, (query, title) in enumerate(list(st.queue)[:10], 1):
+        for i, info in enumerate(list(st.queue)[:10], 1):
+            title = info.get('title', 'Unknown')
             lines.append(f"`{i}.` {title}")
 
         if len(st.queue) > 10:
