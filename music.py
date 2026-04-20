@@ -15,7 +15,11 @@ YDL_OPTIONS = {
     'noplaylist': True,
     'quiet': True,
     'no_warnings': True,
-    'default_search': 'ytsearch',
+    'default_search': 'ytsearch1',  # Limit search to exactly 1 result for speed
+    'nocheckcertificate': True,
+    'ignoreerrors': True,
+    'logtostderr': False,
+    'no_color': True,
     'lazy_extractors': True,
 
     'cookiefile': os.path.join(os.path.dirname(__file__), 'cookies.txt'),
@@ -87,6 +91,8 @@ class GuildState:
         self.current_file: str | None = None
         self.volume: float = 0.5
         self.is_loading: bool = False
+        self.loop_mode: str = "off"  # "off", "song", "queue"
+        self.current_info: dict | None = None
 
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
@@ -138,6 +144,7 @@ class Music(commands.Cog):
         """Start playing a track using extracted info."""
         st = self.state(ctx.guild.id)
         st.is_loading = True
+        st.current_info = info
 
         title = info.get('title', 'Unknown')
         stream_url = info.get('url')
@@ -149,6 +156,7 @@ class Music(commands.Cog):
                 # Use original_url or webpage_url if available
                 query = info.get('original_url') or info.get('webpage_url') or info.get('title')
                 info = await loop.run_in_executor(None, lambda: get_stream_url(query))
+                st.current_info = info
                 stream_url = info.get('url')
                 title = info.get('title', title)
             except Exception as e:
@@ -164,8 +172,9 @@ class Music(commands.Cog):
             return
 
         # Optimized FFmpeg flags for OCI/network resilience
+        user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
         ffmpeg_options = {
-            'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 32k -analyzeduration 0 -fflags nobuffer -flags low_delay',
+            'before_options': f'-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 32k -analyzeduration 0 -fflags nobuffer -flags low_delay -user_agent "{user_agent}"',
             'options': '-vn'
         }
 
@@ -178,7 +187,7 @@ class Music(commands.Cog):
             if ctx.voice_client:
                 st.current_title = title
                 st.is_loading = False
-                await ctx.send(f"▶️ Now playing: **{title}**")
+                await ctx.send(f"▶️ Now playing: **{title}**" + (f" (Loop: {st.loop_mode})" if st.loop_mode != "off" else ""))
                 ctx.voice_client.play(source, after=self._make_after_callback(ctx))
                 
                 # Start pre-fetching the next track if available
@@ -221,6 +230,17 @@ class Music(commands.Cog):
     def _advance(self, ctx: commands.Context):
         """Called when a track ends — pops the next item from the queue."""
         st = self.state(ctx.guild.id)
+        
+        # Handle Loop Logic
+        if st.loop_mode == "song" and st.current_info:
+            # Re-play same track
+            asyncio.run_coroutine_threadsafe(self._play_track(ctx, st.current_info), self.bot.loop)
+            return
+        
+        if st.loop_mode == "queue" and st.current_info:
+            # Add the track that just finished to the back of the queue
+            st.queue.append(st.current_info)
+
         if st.queue:
             info = st.queue.popleft()
             asyncio.run_coroutine_threadsafe(
@@ -228,6 +248,7 @@ class Music(commands.Cog):
             )
         else:
             st.current_title = None
+            st.current_info = None
 
     # ── commands ─────────────────────────────────────────────────────────────
 
@@ -269,8 +290,19 @@ class Music(commands.Cog):
             return await ctx.send("❌ Not connected to voice.")
 
         if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
-            ctx.voice_client.stop()  # triggers _after callback which cleans up
+            # If looping a song, temporarily disable it for manual skip
+            original_loop = st.loop_mode
+            if st.loop_mode == "song":
+                st.loop_mode = "off"
+            
+            ctx.voice_client.stop()
             await ctx.send("⏭️ Skipped.")
+            
+            # Restore loop mode after a tiny delay so _advance sees "off" first
+            if original_loop == "song":
+                await asyncio.sleep(0.5)
+                st.loop_mode = "song"
+                
         elif st.is_loading:
             await ctx.send("⏳ Currently loading the next song... please wait.")
         elif st.queue:
@@ -278,6 +310,53 @@ class Music(commands.Cog):
             await ctx.send("⏭️ Skipped (manual advance).")
         else:
             await ctx.send("❌ Nothing is playing.")
+
+    @commands.command()
+    async def loop(self, ctx, mode: str = None):
+        """Change loop mode: off, song, queue."""
+        st = self.state(ctx.guild.id)
+        valid_modes = ["off", "song", "queue"]
+        
+        if mode is None:
+            # Cycle through modes
+            idx = (valid_modes.index(st.loop_mode) + 1) % len(valid_modes)
+            st.loop_mode = valid_modes[idx]
+        elif mode.lower() in valid_modes:
+            st.loop_mode = mode.lower()
+        else:
+            return await ctx.send(f"❌ Invalid mode. Use: `!loop <off|song|queue>`")
+            
+        emoji = {"off": "➡️", "song": "🔂", "queue": "🔁"}
+        await ctx.send(f"{emoji[st.loop_mode]} Loop mode set to: **{st.loop_mode}**")
+
+    @commands.command()
+    async def shuffle(self, ctx):
+        """Shuffle the current queue."""
+        st = self.state(ctx.guild.id)
+        if len(st.queue) < 2:
+            return await ctx.send("❌ Not enough songs in queue to shuffle.")
+            
+        import random
+        # Convert to list, shuffle, then back to deque
+        temp_list = list(st.queue)
+        random.shuffle(temp_list)
+        st.queue = deque(temp_list)
+        await ctx.send("🔀 Queue shuffled.")
+
+    @commands.command(aliases=['rm'])
+    async def remove(self, ctx, index: int):
+        """Remove a song from the queue by its index."""
+        st = self.state(ctx.guild.id)
+        if index < 1 or index > len(st.queue):
+            return await ctx.send(f"❌ Invalid index. Use `!q` to see song numbers.")
+            
+        # Deque doesn't support direct index removal well, convert to list
+        temp_list = list(st.queue)
+        removed = temp_list.pop(index - 1)
+        st.queue = deque(temp_list)
+        
+        await ctx.send(f"🗑️ Removed: **{removed.get('title')}**")
+
 
     @commands.command()
     async def pause(self, ctx):
