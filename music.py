@@ -11,41 +11,33 @@ TEMP_DIR = os.path.join(tempfile.gettempdir(), 'discord_music')
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 YDL_OPTIONS = {
-    'format': 'bestaudio[ext=webm][abr<=128]/bestaudio[abr<=128]/bestaudio/best',
+    'format': 'bestaudio/best',
     'noplaylist': True,
     'quiet': True,
     'no_warnings': True,
-    'default_search': 'ytsearch1',  # Limit search to exactly 1 result for speed
+    'default_search': 'ytsearch1',
     'nocheckcertificate': True,
     'ignoreerrors': True,
     'logtostderr': False,
     'no_color': True,
     'lazy_extractors': True,
-
+    'cachedir': False,
     'cookiefile': os.path.join(os.path.dirname(__file__), 'cookies.txt'),
-
     'http_headers': {
-        'User-Agent': 'Mozilla/5.0',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     },
-
-    'js_runtimes': {'node': {}},
-    'remote_components': ['ejs:github'],
-
-    'outtmpl': os.path.join(TEMP_DIR, '%(id)s.%(ext)s'),
 }
 
-MUSIC_TEXT_CHANNEL = os.getenv("MUSIC_TEXT_CHANNEL", "music-bot")
+# Persistent YDL instance to avoid re-initialization overhead (~1s save)
+_ydl = yt_dlp.YoutubeDL(YDL_OPTIONS)
 
-
-def get_stream_url(query: str) -> dict:
-    """Search and return the direct stream URL and info."""
-    opts = {**YDL_OPTIONS, 'skip_download': True}
-    if 'outtmpl' in opts: del opts['outtmpl']
-    if 'postprocessors' in opts: del opts['postprocessors']
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(query, download=False)
-        if 'entries' in info:
-            info = info['entries'][0]
+async def get_stream_url(query: str) -> dict:
+    """Search and return the direct stream URL and info asynchronously."""
+    loop = asyncio.get_event_loop()
+    # Offload the blocking extract_info call to a thread to keep the event loop free
+    info = await loop.run_in_executor(None, lambda: _ydl.extract_info(query, download=False))
+    if 'entries' in info:
+        info = info['entries'][0]
     return info
 
 
@@ -151,11 +143,10 @@ class Music(commands.Cog):
         
         # If URL is missing or likely expired (old info), re-extract
         if not stream_url:
-            loop = asyncio.get_event_loop()
             try:
                 # Use original_url or webpage_url if available
                 query = info.get('original_url') or info.get('webpage_url') or info.get('title')
-                info = await loop.run_in_executor(None, lambda: get_stream_url(query))
+                info = await get_stream_url(query)
                 st.current_info = info
                 stream_url = info.get('url')
                 title = info.get('title', title)
@@ -210,10 +201,9 @@ class Music(commands.Cog):
         next_track = st.queue[0]
         # If it's just a placeholder or doesn't have a direct URL, extract it
         if not next_track.get('url'):
-            loop = asyncio.get_event_loop()
             try:
                 query = next_track.get('original_url') or next_track.get('title')
-                info = await loop.run_in_executor(None, lambda: get_stream_url(query))
+                info = await get_stream_url(query)
                 st.queue[0].update(info)
                 print(f"✅ Prefetched: {info.get('title')}")
             except Exception as e:
@@ -267,9 +257,8 @@ class Music(commands.Cog):
         vc = ctx.voice_client
 
         async with ctx.typing():
-            loop = asyncio.get_event_loop()
             try:
-                info = await loop.run_in_executor(None, lambda: get_stream_url(query))
+                info = await get_stream_url(query)
                 info['original_url'] = query # Keep original query
             except Exception as e:
                 return await ctx.send(f"❌ Could not load track: {e}")
