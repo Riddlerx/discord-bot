@@ -436,7 +436,11 @@ class Music(commands.Cog):
             next_track = st.queue[0]
             if not next_track.get('url'):
                 try:
-                    query = next_track.get('original_url') or next_track.get('webpage_url') or next_track.get('title')
+                    # Only use original_url or webpage_url, never title for prefetch
+                    query = next_track.get('original_url') or next_track.get('webpage_url')
+                    if not query:
+                        print(f"⚠️ No valid URL for prefetch, skipping")
+                        return
                     info = await get_stream_url(query)
                     if st.queue and st.queue[0] is next_track:
                         st.queue[0].update(info)
