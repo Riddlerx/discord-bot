@@ -22,10 +22,14 @@ YDL_OPTIONS_FAST = {
     'default_search': 'ytsearch1',
     'quiet': True,
     'no_warnings': True,
-    'js_runtimes': {'node': {}},
+    'source_address': '0.0.0.0', # Bind to IPv4
     'force_ipv4': True,
-    'retries': 0,
-    'extractor_args': {'youtube': {'skip': ['dash', 'hls']}},
+    'cachedir': False,
+    'extract_flat': 'in_playlist',
+    'retries': 3,
+    'fragment_retries': 5,
+    'retry_sleep': 1,
+    'extractor_args': {'youtube': {'skip': ['dash', 'hls'], 'player_client': ['android', 'web']}},
 }
 
 YDL_OPTIONS_FALLBACK = {
@@ -396,10 +400,13 @@ class Music(commands.Cog):
             self._advance(ctx)
             return
 
-        # Optimized FFmpeg flags for OCI/network resilience
-        user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+        # Aggressive reconnection and buffering flags for OCI/Data Center stability
         ffmpeg_options = {
-            'before_options': f'-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 8k -analyzeduration 0 -fflags nobuffer -flags low_delay -user_agent "{user_agent}"',
+            'before_options': (
+                f'-nostdin -reconnect 1 -reconnect_at_eof 1 -reconnect_streamed 1 '
+                f'-reconnect_delay_max 5 -probesize 10M -analyzeduration 0 '
+                f'-user_agent "{user_agent}"'
+            ),
             'options': '-vn -loglevel warning'
         }
 
