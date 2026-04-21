@@ -31,7 +31,6 @@ YDL_OPTIONS_FAST = {
     'extractor_args': {
         'youtube': {
             'player_client': ['android', 'ios'],
-            'player_skip': ['webpage', 'configs'],
         }
     },
 }
