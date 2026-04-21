@@ -383,7 +383,7 @@ class Music(commands.Cog):
         # Optimized FFmpeg flags for OCI/network resilience
         user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
         ffmpeg_options = {
-            'before_options': f'-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 32k -analyzeduration 0 -fflags nobuffer -flags low_delay -user_agent "{user_agent}"',
+            'before_options': f'-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 8k -analyzeduration 0 -fflags nobuffer -flags low_delay -user_agent "{user_agent}"',
             'options': '-vn -loglevel warning'
         }
 
