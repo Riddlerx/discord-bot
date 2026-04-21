@@ -29,7 +29,12 @@ YDL_OPTIONS_FAST = {
     'retries': 3,
     'fragment_retries': 5,
     'retry_sleep': 1,
-    'extractor_args': {'youtube': {'skip': ['dash', 'hls'], 'player_client': ['ios', 'android']}},
+    'extractor_args': {
+        'youtube': {
+            'skip': ['dash', 'hls'],
+            'player_client': ['tvhtml5', 'mweb', 'ios', 'android'],
+        }
+    },
 }
 
 YDL_OPTIONS_FALLBACK = {
@@ -141,7 +146,10 @@ async def _extract_info(query: str) -> dict:
                 raise Exception("No results found.")
                 
             video_info = search_info['entries'][0]
-            video_url = video_info.get('webpage_url')
+            video_url = video_info.get('webpage_url') or video_info.get('url')
+            
+            if not video_url:
+                raise Exception("Search result contained no valid URL.")
             
             # 2. Extract full metadata for the specific video URL
             return await loop.run_in_executor(
