@@ -25,25 +25,12 @@ YDL_OPTIONS_FAST = {
     'js_runtimes': {'node': {}},
     'force_ipv4': True,
     'retries': 0,
-    'extractor_args': {'youtube': {'skip': ['dash', 'hls']}},
 }
 
 YDL_OPTIONS_FALLBACK = {
     **YDL_OPTIONS_FAST,
     'format': 'best',
 }
-
-_ydl_fast = yt_dlp.YoutubeDL(YDL_OPTIONS_FAST)
-_ydl_fallback = yt_dlp.YoutubeDL(YDL_OPTIONS_FALLBACK)
-_ydl_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="yt-dlp")
-_extract_semaphore = asyncio.Semaphore(2)
-_stream_cache: dict[str, tuple[float, dict]] = {}
-_stream_cache_lock = asyncio.Lock()
-_inflight_queries: dict[str, asyncio.Future] = {}
-_inflight_queries_lock = asyncio.Lock()
-_STREAM_CACHE_TTL = 3600
-_STARTUP_WARMUP_DELAY = 5
-_STARTUP_WARMUP_YOUTUBE = os.getenv("MUSIC_WARMUP_YOUTUBE", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _get_yt_dlp_auth_config() -> dict:
@@ -67,11 +54,37 @@ def _get_yt_dlp_auth_config() -> dict:
 
 
 def _build_ydl_options(base_options: dict) -> dict:
-    """Clone base yt-dlp options and apply auth configuration."""
-    return {
+    """Clone base yt-dlp options and apply auth and environment configuration."""
+    options = {
         **base_options,
         **_get_yt_dlp_auth_config(),
     }
+    
+    # Allow overriding IPv4 preference (useful for some Oracle Cloud regions)
+    force_ipv4 = os.getenv("YTDLP_FORCE_IPV4")
+    if force_ipv4 is not None:
+        options["force_ipv4"] = force_ipv4.lower() in ("1", "true", "yes", "on")
+        
+    # Allow specifying different JS runtimes (node, deno, etc.)
+    js_runtime = os.getenv("YTDLP_JS_RUNTIME")
+    if js_runtime:
+        options["js_runtimes"] = {js_runtime: {}}
+        
+    return options
+
+
+# Pre-initialize YoutubeDL instance to cache extractors and session data
+_ydl_fast = yt_dlp.YoutubeDL(_build_ydl_options(YDL_OPTIONS_FAST))
+_ydl_fallback = yt_dlp.YoutubeDL(_build_ydl_options(YDL_OPTIONS_FALLBACK))
+_ydl_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="yt-dlp")
+_extract_semaphore = asyncio.Semaphore(2)
+_stream_cache: dict[str, tuple[float, dict]] = {}
+_stream_cache_lock = asyncio.Lock()
+_inflight_queries: dict[str, asyncio.Future] = {}
+_inflight_queries_lock = asyncio.Lock()
+_STREAM_CACHE_TTL = 3600
+_STARTUP_WARMUP_DELAY = 5
+_STARTUP_WARMUP_YOUTUBE = os.getenv("MUSIC_WARMUP_YOUTUBE", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _normalize_query(value: str | None) -> str | None:
@@ -116,10 +129,6 @@ async def _store_cached_info(info: dict, *keys: str | None):
             if key:
                 _stream_cache[key] = (now, cached_info)
 
-
-# Pre-initialize YoutubeDL instance to cache extractors and session data
-_ydl_fast = yt_dlp.YoutubeDL(_build_ydl_options(YDL_OPTIONS_FAST))
-_ydl_fallback = yt_dlp.YoutubeDL(_build_ydl_options(YDL_OPTIONS_FALLBACK))
 
 async def _extract_info(query: str) -> dict:
     """Extract info by searching first, then getting metadata for the URL."""
