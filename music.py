@@ -29,7 +29,7 @@ YDL_OPTIONS_FAST = {
     'retries': 3,
     'fragment_retries': 5,
     'retry_sleep': 1,
-    'extractor_args': {'youtube': {'skip': ['dash', 'hls'], 'player_client': ['android', 'web']}},
+    'extractor_args': {'youtube': {'skip': ['dash', 'hls'], 'player_client': ['ios', 'android']}},
 }
 
 YDL_OPTIONS_FALLBACK = {
