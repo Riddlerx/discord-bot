@@ -23,6 +23,8 @@ YDL_OPTIONS_FAST = {
     'quiet': True,
     'no_warnings': True,
     'js_runtimes': {'node': {}},
+    'impersonate': 'chrome',
+    'retries': 1,
 }
 
 YDL_OPTIONS_FALLBACK = {
