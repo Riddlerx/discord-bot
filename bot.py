@@ -857,11 +857,17 @@ if __name__ == "__main__":
         async def main():
             async with bot:
                 ensure_voice_dependencies()
-                try:
-                    await bot.load_extension('music')
-                    print("✅ Music extension loaded")
-                except Exception as e:
-                    print(f"❌ Failed to load music extension: {e}")
+                # Check environment variable to conditionally load music
+                enable_music = os.getenv("ENABLE_MUSIC_FEATURES", "false").lower() in ("true", "1", "yes", "on")
+                
+                if enable_music:
+                    try:
+                        await bot.load_extension('music')
+                        print("✅ Music extension loaded")
+                    except Exception as e:
+                        print(f"❌ Failed to load music extension: {e}")
+                else:
+                    print("ℹ️ Music features are disabled in this environment.")
                 
                 await bot.start(DISCORD_BOT_TOKEN)
         
