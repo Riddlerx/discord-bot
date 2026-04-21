@@ -25,6 +25,8 @@ YDL_OPTIONS_FAST = {
     'js_runtimes': {'node': {}},
     'force_ipv4': True,
     'retries': 0,
+    'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'cookiefile': os.getenv("YTDLP_COOKIES") or os.getenv("YOUTUBE_COOKIES_PATH") or '/home/win-htut/discordbot/cookies.txt',
 }
 
 YDL_OPTIONS_FALLBACK = {
@@ -41,11 +43,9 @@ def _get_yt_dlp_auth_config() -> dict:
 
     if cookies_path:
         if not os.path.exists(cookies_path):
-            raise FileNotFoundError(
-                f"yt-dlp cookie file not found: {cookies_path}. "
-                "Set YTDLP_COOKIES to a valid exported YouTube cookies.txt file."
-            )
-        auth_options["cookiefile"] = cookies_path
+            print(f"⚠️ yt-dlp cookie file not found: {cookies_path}")
+        else:
+            auth_options["cookiefile"] = cookies_path
 
     if cookies_from_browser:
         auth_options["cookiesfrombrowser"] = (cookies_from_browser,)
@@ -55,9 +55,10 @@ def _get_yt_dlp_auth_config() -> dict:
 
 def _build_ydl_options(base_options: dict) -> dict:
     """Clone base yt-dlp options and apply auth and environment configuration."""
+    auth_cfg = _get_yt_dlp_auth_config()
     options = {
         **base_options,
-        **_get_yt_dlp_auth_config(),
+        **auth_cfg,
     }
     
     # Allow overriding IPv4 preference (useful for some Oracle Cloud regions)
@@ -69,6 +70,11 @@ def _build_ydl_options(base_options: dict) -> dict:
     js_runtime = os.getenv("YTDLP_JS_RUNTIME")
     if js_runtime:
         options["js_runtimes"] = {js_runtime: {}}
+    
+    if auth_cfg.get("cookiefile"):
+        print(f"✅ Using cookies from: {auth_cfg['cookiefile']}")
+    elif base_options.get("cookiefile"):
+        print(f"✅ Using default cookies from: {base_options['cookiefile']}")
         
     return options
 
@@ -146,7 +152,14 @@ async def _extract_info(query: str) -> dict:
                 raise Exception("No results found.")
                 
             video_info = search_info['entries'][0]
+            
+            # Optimization: If we already have the stream URL and it looks valid, return it
+            if video_info.get('url') and 'googlevideo.com' in video_info.get('url', ''):
+                return video_info
+
             video_url = video_info.get('webpage_url')
+            if not video_url:
+                 return video_info
             
             # 2. Extract full metadata for the specific video URL
             return await loop.run_in_executor(
@@ -156,6 +169,16 @@ async def _extract_info(query: str) -> dict:
             
         except Exception as exc:
             error_text = str(exc).lower()
+            
+            # Handle YouTube rate limiting
+            if "rate-limited" in error_text or "429" in error_text:
+                print(f"⚠️ Rate limited by YouTube for '{query}'. Retrying once after 5s...")
+                await asyncio.sleep(5)
+                return await loop.run_in_executor(
+                    _ydl_executor,
+                    lambda: _ydl_fallback.extract_info(query, download=False),
+                )
+
             if "requested format is not available" in error_text:
                 print(f"⚠️ Preferred format unavailable for '{query}', retrying with broader format...")
                 return await loop.run_in_executor(
