@@ -3,6 +3,7 @@ from discord.ext import commands
 import yt_dlp
 import asyncio
 import os
+import random
 import tempfile
 import glob
 import time
@@ -26,12 +27,23 @@ YDL_OPTIONS_FAST = {
     'force_ipv4': True,
     'retries': 0,
     'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'cookiefile': os.getenv("YTDLP_COOKIES") or os.getenv("YOUTUBE_COOKIES_PATH") or '/home/win-htut/discordbot/cookies.txt',
+    'cookiefile': os.getenv("YTDLP_COOKIES") or os.getenv("YOUTUBE_COOKIES_PATH") or '/home/ubuntu/discordbot/cookies.txt',
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['android', 'ios'],
+            'player_skip': ['webpage', 'configs'],
+        }
+    },
 }
 
 YDL_OPTIONS_FALLBACK = {
     **YDL_OPTIONS_FAST,
     'format': 'best',
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['ios'],
+        }
+    },
 }
 
 
@@ -172,18 +184,19 @@ async def _extract_info(query: str) -> dict:
             
             # Handle YouTube rate limiting
             if "rate-limited" in error_text or "429" in error_text:
-                print(f"⚠️ Rate limited by YouTube for '{query}'. Retrying once after 5s...")
-                await asyncio.sleep(5)
+                print(f"⚠️ Rate limited by YouTube for '{query}'. Retrying once after {delay}s...")
+                await asyncio.sleep(delay)
+                # Use a new instance for retry to avoid session issues
                 return await loop.run_in_executor(
                     _ydl_executor,
-                    lambda: _ydl_fallback.extract_info(query, download=False),
+                    lambda: yt_dlp.YoutubeDL(_build_ydl_options(YDL_OPTIONS_FALLBACK)).extract_info(query, download=False),
                 )
 
             if "requested format is not available" in error_text:
                 print(f"⚠️ Preferred format unavailable for '{query}', retrying with broader format...")
                 return await loop.run_in_executor(
                     _ydl_executor,
-                    lambda: _ydl_fallback.extract_info(query, download=False),
+                    lambda: yt_dlp.YoutubeDL(_build_ydl_options(YDL_OPTIONS_FALLBACK)).extract_info(query, download=False),
                 )
 
             auth_configured = bool(
