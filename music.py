@@ -18,7 +18,7 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 # Support explicit yt-dlp auth config so the bot can run both locally and on servers.
 
 YDL_OPTIONS_FAST = {
-    'format': 'bestaudio[ext=m4a]/bestaudio[ext=opus]/bestaudio', # Prioritize m4a/opus, fallback to best audio
+    'format': 'bestaudio/best', # Reverted to a more general format selection
     'noplaylist': True,
     'default_search': 'ytsearch1',
     'quiet': True,
@@ -37,7 +37,7 @@ YDL_OPTIONS_FAST = {
 
 YDL_OPTIONS_FALLBACK = {
     **YDL_OPTIONS_FAST,
-    'format': 'bestaudio', # Fallback to best audio
+    'format': 'best', # Reverted to a more general fallback format
 }
 
 
