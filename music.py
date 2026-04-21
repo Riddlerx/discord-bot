@@ -117,44 +117,57 @@ async def _store_cached_info(info: dict, *keys: str | None):
                 _stream_cache[key] = (now, cached_info)
 
 
+# Pre-initialize YoutubeDL instance to cache extractors and session data
+_ydl_fast = yt_dlp.YoutubeDL(_build_ydl_options(YDL_OPTIONS_FAST))
+_ydl_fallback = yt_dlp.YoutubeDL(_build_ydl_options(YDL_OPTIONS_FALLBACK))
+
 async def _extract_info(query: str) -> dict:
-    """Extract info with fast client, falling back to broader format selection."""
+    """Extract info by searching first, then getting metadata for the URL."""
     loop = asyncio.get_running_loop()
-    auth_configured = bool(
-        os.getenv("YTDLP_COOKIES")
-        or os.getenv("YTDLP_COOKIES_FROM_BROWSER")
-        or os.getenv("YOUTUBE_COOKIES_PATH")
-    )
 
     async with _extract_semaphore:
         try:
-            ydl = yt_dlp.YoutubeDL(_build_ydl_options(YDL_OPTIONS_FAST))
+            # 1. Quick search to get URL
+            search_info = await loop.run_in_executor(
+                _ydl_executor,
+                lambda: _ydl_fast.extract_info(f"ytsearch1:{query}", download=False)
+            )
+            
+            if not search_info or not search_info.get('entries'):
+                raise Exception("No results found.")
+                
+            video_info = search_info['entries'][0]
+            video_url = video_info.get('webpage_url')
+            
+            # 2. Extract full metadata for the specific video URL
             return await loop.run_in_executor(
                 _ydl_executor,
-                lambda: ydl.extract_info(query, download=False),
+                lambda: _ydl_fast.extract_info(video_url, download=False)
             )
-        except FileNotFoundError as fnf_error:
-            print(f"Error: {fnf_error}")
-            raise
+            
         except Exception as exc:
             error_text = str(exc).lower()
             if "requested format is not available" in error_text:
                 print(f"⚠️ Preferred format unavailable for '{query}', retrying with broader format...")
-                ydl_fallback = yt_dlp.YoutubeDL(_build_ydl_options(YDL_OPTIONS_FALLBACK))
                 return await loop.run_in_executor(
                     _ydl_executor,
-                    lambda: ydl_fallback.extract_info(query, download=False),
+                    lambda: _ydl_fallback.extract_info(query, download=False),
                 )
+
+            auth_configured = bool(
+                os.getenv("YTDLP_COOKIES")
+                or os.getenv("YTDLP_COOKIES_FROM_BROWSER")
+                or os.getenv("YOUTUBE_COOKIES_PATH")
+            )
 
             if "sign in to confirm you’re not a bot" in error_text or "sign in to confirm you're not a bot" in error_text:
                 if not auth_configured:
                     raise RuntimeError(
                         "YouTube blocked this server IP. Configure yt-dlp authentication on the host by "
-                        "setting YTDLP_COOKIES=/path/to/cookies.txt, then restart the bot. "
-                        "YTDLP_COOKIES_FROM_BROWSER is mainly useful on machines that already have a local browser profile."
+                        "setting YTDLP_COOKIES=/path/to/cookies.txt, then restart the bot."
                     ) from exc
                 raise RuntimeError(
-                    "YouTube rejected the configured authentication. The cookie file is likely expired or invalid for this host."
+                    "YouTube rejected the configured authentication."
                 ) from exc
 
             raise exc
