@@ -39,7 +39,7 @@ _stream_cache_lock = asyncio.Lock()
 _inflight_queries: dict[str, asyncio.Future] = {}
 _inflight_queries_lock = asyncio.Lock()
 _STREAM_CACHE_TTL = 3600
-_STARTUP_WARMUP_DELAY = 45
+_STARTUP_WARMUP_DELAY = 5
 _STARTUP_WARMUP_YOUTUBE = os.getenv("MUSIC_WARMUP_YOUTUBE", "").strip().lower() in ("1", "true", "yes", "on")
 
 
