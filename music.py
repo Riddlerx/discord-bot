@@ -484,14 +484,22 @@ class Music(commands.Cog):
             return
 
         st = self.state(ctx.guild.id)
+        print(f"DEBUG: !play command start for '{query}'")
 
         async with ctx.typing():
             try:
+                start_time = time.perf_counter()
+                
                 voice_task = asyncio.create_task(self._ensure_voice(ctx))
                 info_task = asyncio.create_task(get_stream_url(query))
+                
                 voice_ok, info = await asyncio.gather(voice_task, info_task)
+                
+                print(f"DEBUG: Extraction/Voice took {time.perf_counter() - start_time:.2f}s")
+                
                 info['original_url'] = query  # Keep original query
             except Exception as e:
+                print(f"DEBUG: Error loading track: {e}")
                 return await ctx.send(f"❌ Could not load track: {e}")
 
         if not voice_ok:
