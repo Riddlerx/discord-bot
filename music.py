@@ -24,7 +24,8 @@ YDL_OPTIONS_FAST = {
     'no_warnings': True,
     'js_runtimes': {'node': {}},
     'force_ipv4': True,
-    'retries': 1,
+    'retries': 0,
+    'extractor_args': {'youtube': {'skip': ['dash', 'hls']}},
 }
 
 YDL_OPTIONS_FALLBACK = {
