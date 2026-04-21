@@ -488,14 +488,13 @@ class Music(commands.Cog):
 
         async with ctx.typing():
             try:
-                start_time = time.perf_counter()
+                s_voice = time.perf_counter()
+                voice_ok = await self._ensure_voice(ctx)
+                print(f"DEBUG: Voice took {time.perf_counter() - s_voice:.2f}s")
                 
-                voice_task = asyncio.create_task(self._ensure_voice(ctx))
-                info_task = asyncio.create_task(get_stream_url(query))
-                
-                voice_ok, info = await asyncio.gather(voice_task, info_task)
-                
-                print(f"DEBUG: Extraction/Voice took {time.perf_counter() - start_time:.2f}s")
+                s_info = time.perf_counter()
+                info = await get_stream_url(query)
+                print(f"DEBUG: Extraction took {time.perf_counter() - s_info:.2f}s")
                 
                 info['original_url'] = query  # Keep original query
             except Exception as e:
