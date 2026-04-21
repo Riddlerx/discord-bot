@@ -23,7 +23,7 @@ YDL_OPTIONS_FAST = {
     'quiet': True,
     'no_warnings': True,
     'js_runtimes': {'node': {}},
-    'impersonate': 'chrome',
+    'force_ipv4': True,
     'retries': 1,
 }
 
