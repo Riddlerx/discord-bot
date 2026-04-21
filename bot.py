@@ -88,20 +88,26 @@ bot = commands.Bot(
 auto_update_task: Optional[asyncio.Task] = None
 
 
-def ensure_opus_loaded() -> None:
-    """Load the system Opus library required for Discord voice."""
-    if discord.opus.is_loaded():
-        return
+def ensure_voice_dependencies() -> None:
+    """Check for Opus and Davey libraries required for Discord voice."""
+    # Check Opus
+    if not discord.opus.is_loaded():
+        for candidate in ("libopus.so.0", "libopus.so"):
+            try:
+                discord.opus.load_opus(candidate)
+                print(f"✅ Loaded Opus library: {candidate}")
+                break
+            except OSError:
+                continue
+        else:
+            print("⚠️ Opus library could not be loaded. Voice playback may fail.")
 
-    for candidate in ("libopus.so.0", "libopus.so"):
-        try:
-            discord.opus.load_opus(candidate)
-            print(f"✅ Loaded Opus library: {candidate}")
-            return
-        except OSError:
-            continue
-
-    print("⚠️ Opus library could not be loaded. Voice playback may fail.")
+    # Check Davey (for E2EE voice support in newer discord.py versions)
+    try:
+        import davey
+        print(f"✅ Davey library found (v{getattr(davey, '__version__', 'unknown')})")
+    except ImportError:
+        print("⚠️ Davey library not found. Voice connection might fail with 'davey library needed'.")
 
 # ... (rest of global state)
 
@@ -850,7 +856,7 @@ if __name__ == "__main__":
     else:
         async def main():
             async with bot:
-                ensure_opus_loaded()
+                ensure_voice_dependencies()
                 try:
                     await bot.load_extension('music')
                     print("✅ Music extension loaded")
