@@ -18,7 +18,7 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 # Support explicit yt-dlp auth config so the bot can run both locally and on servers.
 
 YDL_OPTIONS_FAST = {
-    'format': 'bestaudio/best',
+    'format': 'bestaudio[ext=m4a]/bestaudio/best',
     'noplaylist': True,
     'default_search': 'ytsearch1',
     'quiet': True,
@@ -31,14 +31,14 @@ YDL_OPTIONS_FAST = {
     'proxy': os.getenv("YTDLP_PROXY"),  # Optional: residential proxy (e.g. socks5://user:pass@host:port)
     'extractor_args': {
         'youtube': {
-            'player_client': ['ios', 'web'],  # 'ios' URLs are more permissive; 'web' as fallback
+            'player_client': ['web'],  # 'ios' URLs are more permissive; 'web' as fallback
         }
     },
 }
 
 YDL_OPTIONS_FALLBACK = {
     **YDL_OPTIONS_FAST,
-    'format': 'best',
+    'format': 'worstaudio/worst/best',
 }
 
 
