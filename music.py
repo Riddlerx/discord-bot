@@ -16,7 +16,7 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 # ── yt-dlp options ─────────────────────────────────────────────────────────────
 
 YDL_OPTIONS_FAST = {
-    'format': 'bestaudio/worstaudio',
+    'format': 'bestaudio/worstaudio/best',
     'noplaylist': True,
     'default_search': 'ytsearch1',
     'quiet': True,
@@ -27,6 +27,11 @@ YDL_OPTIONS_FAST = {
     'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     'cookiefile': os.getenv("YTDLP_COOKIES") or os.getenv("YOUTUBE_COOKIES_PATH") or '/home/ubuntu/discordbot/cookies.txt',
     'proxy': os.getenv("YTDLP_PROXY"),
+    'postprocessors': [{
+        'key': 'FFmpegExtractAudio',
+        'preferredcodec': 'opus',
+    }],
+}
     'extractor_args': {
         'youtube': {
             'player_client': ['web'],
@@ -37,7 +42,7 @@ YDL_OPTIONS_FAST = {
 
 YDL_OPTIONS_FALLBACK = {
     **YDL_OPTIONS_FAST,
-    'format': 'worstaudio/worst',
+    'format': 'worstaudio/worst/best',
 }
 
 
