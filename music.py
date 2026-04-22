@@ -27,17 +27,16 @@ YDL_OPTIONS_FAST = {
     'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     'cookiefile': os.getenv("YTDLP_COOKIES") or os.getenv("YOUTUBE_COOKIES_PATH") or '/home/ubuntu/discordbot/cookies.txt',
     'proxy': os.getenv("YTDLP_PROXY"),
-    'postprocessors': [{
-        'key': 'FFmpegExtractAudio',
-        'preferredcodec': 'opus',
-    }],
-}
     'extractor_args': {
         'youtube': {
             'player_client': ['web'],
         }
     },
     'outtmpl': os.path.join(TEMP_DIR, '%(id)s.%(ext)s'),
+    'postprocessors': [{
+        'key': 'FFmpegExtractAudio',
+        'preferredcodec': 'opus',
+    }],
 }
 
 YDL_OPTIONS_FALLBACK = {
