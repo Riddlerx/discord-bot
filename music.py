@@ -18,7 +18,7 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 # Support explicit yt-dlp auth config so the bot can run both locally and on servers.
 
 YDL_OPTIONS_FAST = {
-    'format': 'bestaudio/best', # Reverted to a more general format selection
+    'format': 'bestaudio/best',
     'noplaylist': True,
     'default_search': 'ytsearch1',
     'quiet': True,
@@ -31,14 +31,14 @@ YDL_OPTIONS_FAST = {
     'proxy': os.getenv("YTDLP_PROXY"),  # Optional: residential proxy (e.g. socks5://user:pass@host:port)
     'extractor_args': {
         'youtube': {
-            'player_client': ['web'],  # 'web' is more consistent with datacenter IPs
+            'player_client': ['ios', 'web'],  # 'ios' URLs are more permissive; 'web' as fallback
         }
     },
 }
 
 YDL_OPTIONS_FALLBACK = {
     **YDL_OPTIONS_FAST,
-    'format': 'best', # Reverted to a more general fallback format
+    'format': 'best',
 }
 
 
@@ -201,7 +201,7 @@ async def _extract_info(query: str) -> dict:
                 or os.getenv("YOUTUBE_COOKIES_PATH")
             )
 
-            if "sign in to confirm you’re not a bot" in error_text or "sign in to confirm you're not a bot" in error_text:
+            if "sign in to confirm you're not a bot" in error_text or "sign in to confirm you\u2019re not a bot" in error_text:
                 if not auth_configured:
                     raise RuntimeError(
                         "YouTube blocked this server IP. Configure yt-dlp authentication on the host by "
@@ -294,6 +294,43 @@ def cleanup_all():
             os.remove(f)
         except Exception:
             pass
+
+
+async def _download_audio(info: dict) -> str:
+    """Download audio to disk using yt-dlp. Returns file path.
+
+    yt-dlp handles all cookies/headers/PO-tokens internally during the
+    download, so the resulting file can be played by FFmpeg without any
+    authentication headers.
+    """
+    video_id = info.get('id')
+    if not video_id:
+        raise Exception("No video ID in info dict")
+
+    # Already on disk?
+    existing = get_audio_path(video_id)
+    if existing:
+        return existing
+
+    url = info.get('webpage_url') or info.get('original_url')
+    if not url:
+        raise Exception("No URL available for download")
+
+    loop = asyncio.get_running_loop()
+
+    def _do_download():
+        opts = _build_ydl_options(YDL_OPTIONS_FAST)
+        opts['outtmpl'] = os.path.join(TEMP_DIR, '%(id)s.%(ext)s')
+        opts['retries'] = 3
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([url])
+        path = get_audio_path(video_id)
+        if not path:
+            raise Exception(f"Download finished but file not found for {video_id}")
+        return path
+
+    async with _extract_semaphore:
+        return await loop.run_in_executor(_ydl_executor, _do_download)
 
 
 # ── Per-guild state ────────────────────────────────────────────────────────────
@@ -404,51 +441,43 @@ class Music(commands.Cog):
         return True
 
     async def _play_track(self, ctx: commands.Context, info: dict, *, ensure_voice: bool = True):
-        """Start playing a track using extracted info."""
+        """Start playing a track from a downloaded file."""
         st = self.state(ctx.guild.id)
 
-        # Ensure we are actually connected
         if ensure_voice and not await self._ensure_voice(ctx):
             return
 
         st.is_loading = True
         st.current_info = info
-
         title = info.get('title', 'Unknown')
-        stream_url = info.get('url')
-        
-        # If URL is missing or likely expired (old info), re-extract
-        if not stream_url:
+
+        # ── Download audio to disk (yt-dlp handles all auth/cookies) ──
+        audio_path = info.get('_audio_path')
+        if not audio_path or not os.path.exists(audio_path):
             try:
-                query = info.get('original_url') or info.get('webpage_url') or info.get('title')
-                info = await get_stream_url(query, refresh=True)
-                st.current_info = info
-                stream_url = info.get('url')
-                title = info.get('title', title)
+                # Make sure we have full info with a video ID
+                if not info.get('id'):
+                    query = info.get('original_url') or info.get('webpage_url') or info.get('title')
+                    info = await get_stream_url(query, refresh=True)
+                    st.current_info = info
+                    title = info.get('title', title)
+
+                audio_path = await _download_audio(info)
+                print(f"DEBUG: Downloaded to {audio_path}")
             except Exception as e:
-                await ctx.send(f"❌ Could not re-extract track: {e}")
+                await ctx.send(f"❌ Could not download track: {e}")
                 st.is_loading = False
                 self._advance(ctx)
                 return
 
-        if not stream_url:
-            await ctx.send(f"❌ Could not extract stream URL for **{title}**")
-            st.is_loading = False
-            self._advance(ctx)
-            return
+        st.current_file = audio_path
 
-        # Optimized FFmpeg flags for OCI/network resilience
-        user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
-        ffmpeg_options = {
-            'before_options': f'-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -probesize 8k -analyzeduration 0 -fflags nobuffer -flags low_delay -user_agent "{user_agent}"',
-            'options': '-vn -loglevel warning'
-        }
-
+        # ── Play from local file — no HTTP auth needed ──
         source = discord.PCMVolumeTransformer(
-            discord.FFmpegPCMAudio(stream_url, **ffmpeg_options),
+            discord.FFmpegPCMAudio(audio_path, before_options='-nostdin', options='-vn -loglevel warning'),
             volume=st.volume,
         )
-        
+
         try:
             if ctx.voice_client:
                 st.current_title = title
@@ -472,7 +501,7 @@ class Music(commands.Cog):
         st.prefetch_task = self.bot.loop.create_task(self._prefetch_next(ctx))
 
     async def _prefetch_next(self, ctx: commands.Context):
-        """Extract info for the next track in queue while current is playing."""
+        """Pre-download audio for the next track while current plays."""
         st = self.state(ctx.guild.id)
         current_task = asyncio.current_task()
         try:
@@ -480,15 +509,22 @@ class Music(commands.Cog):
                 return
 
             next_track = st.queue[0]
-            if not next_track.get('url'):
-                try:
+            try:
+                # Ensure we have full info (with video ID)
+                if not next_track.get('id'):
                     query = next_track.get('original_url') or next_track.get('webpage_url') or next_track.get('title')
                     info = await get_stream_url(query)
                     if st.queue and st.queue[0] is next_track:
                         st.queue[0].update(info)
-                        print(f"✅ Prefetched: {info.get('title')}")
-                except Exception as e:
-                    print(f"⚠️ Prefetch failed: {e}")
+
+                # Download audio file
+                if st.queue and st.queue[0] is next_track and next_track.get('id'):
+                    path = await _download_audio(next_track)
+                    if st.queue and st.queue[0] is next_track:
+                        st.queue[0]['_audio_path'] = path
+                        print(f"✅ Prefetched: {next_track.get('title')}")
+            except Exception as e:
+                print(f"⚠️ Prefetch failed: {e}")
         finally:
             if st.prefetch_task is current_task:
                 st.prefetch_task = None
@@ -668,12 +704,14 @@ class Music(commands.Cog):
         st.queue.clear()
         st.current_title = None
         st.current_info = None
+        st.current_file = None
         st.is_loading = False
         if st.prefetch_task and not st.prefetch_task.done():
             st.prefetch_task.cancel()
             st.prefetch_task = None
         if ctx.voice_client:
             await ctx.voice_client.disconnect()
+        cleanup_all()
         await ctx.send("⏹️ Stopped and left the channel.")
 
     @commands.command(aliases=['q'])
@@ -734,11 +772,13 @@ class Music(commands.Cog):
                 st.queue.clear()
                 st.current_title = None
                 st.current_info = None
+                st.current_file = None
                 st.is_loading = False
                 if st.prefetch_task and not st.prefetch_task.done():
                     st.prefetch_task.cancel()
                     st.prefetch_task = None
                 await vc.disconnect()
+                cleanup_all()
 
 
 async def setup(bot):
