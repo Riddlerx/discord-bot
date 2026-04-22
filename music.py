@@ -28,9 +28,10 @@ YDL_OPTIONS_FAST = {
     'retries': 0,
     'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     'cookiefile': os.getenv("YTDLP_COOKIES") or os.getenv("YOUTUBE_COOKIES_PATH") or '/home/ubuntu/discordbot/cookies.txt',
+    'proxy': os.getenv("YTDLP_PROXY"),  # Optional: residential proxy (e.g. socks5://user:pass@host:port)
     'extractor_args': {
         'youtube': {
-            'player_client': ['android', 'ios'],
+            'player_client': ['web'],  # 'web' is more consistent with datacenter IPs
         }
     },
 }
@@ -145,6 +146,7 @@ async def _store_cached_info(info: dict, *keys: str | None):
 async def _extract_info(query: str) -> dict:
     """Extract info by searching first, then getting metadata for the URL."""
     loop = asyncio.get_running_loop()
+    delay = 5  # seconds to wait before retry on rate-limit
 
     async with _extract_semaphore:
         try:
