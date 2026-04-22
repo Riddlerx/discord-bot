@@ -16,7 +16,7 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 # ── yt-dlp options ─────────────────────────────────────────────────────────────
 
 YDL_OPTIONS_FAST = {
-    'format': 'bestaudio[ext=m4a]/bestaudio/best',
+    'format': 'bestaudio/worstaudio',
     'noplaylist': True,
     'default_search': 'ytsearch1',
     'quiet': True,
@@ -37,7 +37,7 @@ YDL_OPTIONS_FAST = {
 
 YDL_OPTIONS_FALLBACK = {
     **YDL_OPTIONS_FAST,
-    'format': 'worstaudio/worst/best',
+    'format': 'worstaudio/worst',
 }
 
 
