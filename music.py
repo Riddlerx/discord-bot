@@ -7,6 +7,7 @@ import random
 import tempfile
 import glob
 import time
+import gc
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
 
@@ -511,6 +512,7 @@ class Music(commands.Cog):
         def _after(error):
             if error:
                 print(f"\u274c Voice playback error: {error}")
+            gc.collect() # Reclaim memory from the finished stream
             self._advance(ctx)
         return _after
 
@@ -683,6 +685,7 @@ class Music(commands.Cog):
         if ctx.voice_client:
             await ctx.voice_client.disconnect()
         cleanup_all()
+        gc.collect()
         await ctx.send("\u23f9\ufe0f Stopped and left the channel.")
 
     @commands.command(aliases=['q'])
@@ -752,6 +755,7 @@ class Music(commands.Cog):
                     st.prefetch_task = None
                 await vc.disconnect()
                 cleanup_all()
+                gc.collect()
 
 
 async def setup(bot):
