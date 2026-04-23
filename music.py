@@ -371,14 +371,13 @@ class Music(commands.Cog):
             await ctx.send("\u274c Music commands can only be used in a server.")
             return False
 
-        music_channel = os.getenv("MUSIC_TEXT_CHANNEL")
-        if not music_channel:
+        # Default to 'music-bot' if not specified in environment
+        music_channel_name = os.getenv("MUSIC_TEXT_CHANNEL", "music-bot")
+
+        if isinstance(ctx.channel, discord.TextChannel) and ctx.channel.name == music_channel_name:
             return True
 
-        if isinstance(ctx.channel, discord.TextChannel) and ctx.channel.name == music_channel:
-            return True
-
-        await ctx.send(f"\u274c Use music commands in #{music_channel}.")
+        await ctx.send(f"\u274c Music commands can only be used in the #{music_channel_name} channel.")
         return False
 
     # ── internal playback ────────────────────────────────────────────────────
@@ -431,14 +430,26 @@ class Music(commands.Cog):
 
         st.current_file = audio_path
 
-        source = discord.PCMVolumeTransformer(
-            discord.FFmpegPCMAudio(
-                audio_path, 
-                before_options='-nostdin -thread_queue_size 4096', 
-                options='-vn -loglevel warning'
-            ),
-            volume=st.volume,
-        )
+        # Using FFmpeg filters for volume control to allow using FFmpegOpusAudio
+        # This is much more CPU efficient on e2-micro instances
+        volume_filter = f'volume={st.volume}'
+        
+        try:
+            source = discord.FFmpegOpusAudio(
+                audio_path,
+                before_options='-nostdin -thread_queue_size 4096',
+                options=f'-vn -loglevel warning -af {volume_filter}'
+            )
+        except Exception as e:
+            print(f"DEBUG: FFmpegOpusAudio failed, falling back to PCMAudio: {e}")
+            source = discord.PCMVolumeTransformer(
+                discord.FFmpegPCMAudio(
+                    audio_path,
+                    before_options='-nostdin -thread_queue_size 4096',
+                    options=f'-vn -loglevel warning -af {volume_filter}'
+                ),
+                volume=st.volume
+            )
 
         try:
             if ctx.voice_client:
@@ -694,9 +705,11 @@ class Music(commands.Cog):
             return await ctx.send("\u274c Volume must be between 1 and 100.")
         st = self.state(ctx.guild.id)
         st.volume = level / 100
-        if ctx.voice_client and ctx.voice_client.source:
-            ctx.voice_client.source.volume = st.volume
-        await ctx.send(f"\U0001f50a Volume set to **{level}%**")
+        
+        if ctx.voice_client and ctx.voice_client.is_playing():
+             await ctx.send(f"\u2705 Volume set to **{level}%** (will apply to the next song).")
+        else:
+             await ctx.send(f"\u2705 Volume set to **{level}%**")
 
     @commands.command(aliases=['np'])
     async def nowplaying(self, ctx):

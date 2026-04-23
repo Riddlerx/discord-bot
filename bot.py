@@ -122,8 +122,9 @@ async def safe_get(session: aiohttp.ClientSession, url: str, params: Optional[Di
                     # 400/404 are common for missing characters on Raider.io, handle silently
                     return None
                 elif response.status == 429:
-                    # Rate limited, wait longer
-                    await asyncio.sleep(delay * 3)
+                    # Rate limited, wait longer with jitter
+                    wait_time = delay * 5 + random.uniform(1, 5)
+                    await asyncio.sleep(wait_time)
                 
                 if response.status != 200:
                      print(f"⚠️ Request failed (status {response.status}, attempt {attempt}/{retries}): {url}")
