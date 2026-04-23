@@ -434,8 +434,8 @@ class Music(commands.Cog):
         source = discord.PCMVolumeTransformer(
             discord.FFmpegPCMAudio(
                 audio_path, 
-                before_options='-nostdin', 
-                options='-vn -loglevel warning -thread_queue_size 4096'
+                before_options='-nostdin -thread_queue_size 4096', 
+                options='-vn -loglevel warning'
             ),
             volume=st.volume,
         )
