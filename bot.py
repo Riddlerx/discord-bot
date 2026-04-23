@@ -84,6 +84,8 @@ bot = commands.Bot(
     intents=intents,
     member_cache_flags=discord.MemberCacheFlags.none(),
     chunk_guilds_at_startup=False,
+    gateway_queue_amount=1,  # Keep gateway queue lean
+    heartbeat_timeout=120.0, # Give more room for missed heartbeats
 )
 auto_update_task: Optional[asyncio.Task] = None
 
@@ -391,8 +393,17 @@ async def build_guild_vault(session: aiohttp.ClientSession) -> str:
     if not guild:
         return "⚠️ Error fetching guild roster."
 
-    # Fetch all character data in parallel with limited concurrency
-    tasks = [fetch_char_stats(session, char) for char in guild]
+    # Fetch all character data with limited concurrency to save CPU/Network on Cloud VM
+    semaphore = asyncio.Semaphore(3)
+
+    async def sem_fetch(char):
+        async with semaphore:
+            result = await fetch_char_stats(session, char)
+            # Small sleep to spread out CPU load
+            await asyncio.sleep(0.1)
+            return result
+
+    tasks = [sem_fetch(char) for char in guild]
     results = await asyncio.gather(*tasks)
     rows = [r for r in results if r is not None]
 

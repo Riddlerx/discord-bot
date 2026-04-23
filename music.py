@@ -36,6 +36,9 @@ YDL_OPTIONS_FAST = {
             'player_skip': ['webpage', 'configs'],
         }
     },
+    'noprogress': True,
+    'no_part': True,  # Write directly to destination to save disk I/O
+    'buffersize': 16384, # 16K buffer to keep RAM usage low
     'outtmpl': os.path.join(TEMP_DIR, '%(id)s.%(ext)s'),
 }
 
@@ -385,16 +388,22 @@ class Music(commands.Cog):
     async def _ensure_voice(self, ctx: commands.Context) -> bool:
         """Connect/move to the author's voice channel. Returns False on failure."""
         try:
-            if ctx.voice_client and ctx.voice_client.is_connected():
-                return True
+            if ctx.voice_client:
+                if ctx.voice_client.is_connected():
+                    # Move if author is in a different channel
+                    if ctx.author.voice and ctx.voice_client.channel != ctx.author.voice.channel:
+                        await ctx.voice_client.move_to(ctx.author.voice.channel)
+                    return True
+                else:
+                    # Clean up "ghost" connection
+                    await ctx.voice_client.disconnect(force=True)
+
             if not ctx.author.voice:
                 await ctx.send("\u274c Join a voice channel first.")
                 return False
-            channel = ctx.author.voice.channel
-            if ctx.voice_client is None:
-                await channel.connect()
-            elif ctx.voice_client.channel != channel:
-                await ctx.voice_client.move_to(channel)
+
+            await ctx.author.voice.channel.connect(timeout=60.0, reconnect=True)
+            return True
         except discord.ClientException as exc:
             await ctx.send(f"\u274c Could not join voice: {exc}")
             return False
