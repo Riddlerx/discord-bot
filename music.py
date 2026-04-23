@@ -16,20 +16,24 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 # ── yt-dlp options ─────────────────────────────────────────────────────────────
 
 YDL_OPTIONS_FAST = {
-    'format': 'worstaudio,wrost',
+    'format': 'bestaudio/best',
     'noplaylist': True,
     'default_search': 'ytsearch1',
     'quiet': True,
     'no_warnings': True,
+    'no_color': True,
     'js_runtimes': {'node': {}},
     'force_ipv4': True,
-    'retries': 3,
+    'retries': 5,
+    'fragment_retries': 5,
+    'concurrent_fragment_downloads': 5,
     'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'cookiefile': os.getenv("YTDLP_COOKIES") or os.getenv("YOUTUBE_COOKIES_PATH") or '/home/ubuntu/discordbot/cookies.txt',
+    'cookiefile': os.getenv("YTDLP_COOKIES") or os.getenv("YOUTUBE_COOKIES_PATH") or 'cookies.txt',
     'proxy': os.getenv("YTDLP_PROXY"),
     'extractor_args': {
         'youtube': {
-            'player_client': ['web'],
+            'player_client': ['android', 'web'],
+            'player_skip': ['webpage', 'configs'],
         }
     },
     'outtmpl': os.path.join(TEMP_DIR, '%(id)s.%(ext)s'),
@@ -37,7 +41,7 @@ YDL_OPTIONS_FAST = {
 
 YDL_OPTIONS_FALLBACK = {
     **YDL_OPTIONS_FAST,
-    'format': 'worstaudio/worst',
+    'format': 'bestaudio/best',
 }
 
 
@@ -296,6 +300,7 @@ class Music(commands.Cog):
         self.bot = bot
         self._states: dict[int, GuildState] = {}
         self._warmup_task: asyncio.Task | None = None
+        self._cleanup_task: asyncio.Task | None = None
 
     def state(self, guild_id: int) -> GuildState:
         if guild_id not in self._states:
@@ -303,14 +308,34 @@ class Music(commands.Cog):
         return self._states[guild_id]
 
     async def cog_load(self):
+        cleanup_all()
         self._warmup_task = asyncio.create_task(self._warmup_extractors())
+        self._cleanup_task = asyncio.create_task(self._periodic_cleanup())
 
     def cog_unload(self):
         if self._warmup_task and not self._warmup_task.done():
             self._warmup_task.cancel()
+        if self._cleanup_task and not self._cleanup_task.done():
+            self._cleanup_task.cancel()
         for st in self._states.values():
             if st.prefetch_task and not st.prefetch_task.done():
                 st.prefetch_task.cancel()
+
+    async def _periodic_cleanup(self):
+        """Periodically remove old audio files to save disk space."""
+        try:
+            while True:
+                await asyncio.sleep(3600)  # Every hour
+                now = time.time()
+                for f in glob.glob(os.path.join(TEMP_DIR, '*')):
+                    try:
+                        # If file is older than 2 hours, remove it
+                        if os.path.isfile(f) and now - os.path.getmtime(f) > 7200:
+                            os.remove(f)
+                    except Exception:
+                        pass
+        except asyncio.CancelledError:
+            pass
 
     async def _warmup_extractors(self):
         try:
@@ -407,7 +432,11 @@ class Music(commands.Cog):
         st.current_file = audio_path
 
         source = discord.PCMVolumeTransformer(
-            discord.FFmpegPCMAudio(audio_path, before_options='-nostdin', options='-vn -loglevel warning'),
+            discord.FFmpegPCMAudio(
+                audio_path, 
+                before_options='-nostdin', 
+                options='-vn -loglevel warning -thread_queue_size 4096'
+            ),
             volume=st.volume,
         )
 
@@ -438,6 +467,9 @@ class Music(commands.Cog):
         st = self.state(ctx.guild.id)
         current_task = asyncio.current_task()
         try:
+            # Small delay to let the current playback stabilize
+            await asyncio.sleep(5)
+            
             if not st.queue:
                 return
             next_track = st.queue[0]
