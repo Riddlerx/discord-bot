@@ -16,7 +16,7 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 # ── yt-dlp options ─────────────────────────────────────────────────────────────
 
 YDL_OPTIONS_FAST = {
-    'format': 'bestaudio/worstaudio/best',
+    'format': 'worstaudio',
     'noplaylist': True,
     'default_search': 'ytsearch1',
     'quiet': True,
@@ -33,15 +33,11 @@ YDL_OPTIONS_FAST = {
         }
     },
     'outtmpl': os.path.join(TEMP_DIR, '%(id)s.%(ext)s'),
-    'postprocessors': [{
-        'key': 'FFmpegExtractAudio',
-        'preferredcodec': 'opus',
-    }],
 }
 
 YDL_OPTIONS_FALLBACK = {
     **YDL_OPTIONS_FAST,
-    'format': 'worstaudio/worst/best',
+    'format': 'worstaudio/worst',
 }
 
 
@@ -88,7 +84,7 @@ def _build_ydl_options(base_options: dict) -> dict:
 
 
 _ydl_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="yt-dlp")
-_extract_semaphore = asyncio.Semaphore(2)
+_extract_semaphore = asyncio.Semaphore(1)
 _info_cache: dict[str, tuple[float, dict]] = {}
 _info_cache_lock = asyncio.Lock()
 _inflight_queries: dict[str, asyncio.Future] = {}
