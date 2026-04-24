@@ -393,23 +393,31 @@ class Music(commands.Cog):
                 if ctx.voice_client.is_connected():
                     # Move if author is in a different channel
                     if ctx.author.voice and ctx.voice_client.channel != ctx.author.voice.channel:
+                        print(
+                            f"ℹ️ Moving voice client in guild {ctx.guild.id} "
+                            f"from {ctx.voice_client.channel} to {ctx.author.voice.channel}"
+                        )
                         await ctx.voice_client.move_to(ctx.author.voice.channel)
                     return True
                 else:
                     # Clean up "ghost" connection
+                    print(f"⚠️ Found ghost voice client in guild {ctx.guild.id}, disconnecting it")
                     await ctx.voice_client.disconnect(force=True)
 
             if not ctx.author.voice:
                 await ctx.send("\u274c Join a voice channel first.")
                 return False
 
+            print(f"ℹ️ Connecting voice client in guild {ctx.guild.id} to {ctx.author.voice.channel}")
             await ctx.author.voice.channel.connect(timeout=60.0, reconnect=True)
             return True
         except discord.ClientException as exc:
             await ctx.send(f"\u274c Could not join voice: {exc}")
+            print(f"❌ Could not join voice in guild {ctx.guild.id}: {exc}")
             return False
         except Exception as exc:
             await ctx.send(f"\u274c Voice connection failed: {exc}")
+            print(f"❌ Voice connection failed in guild {ctx.guild.id}: {exc}")
             return False
         return True
 
@@ -466,6 +474,7 @@ class Music(commands.Cog):
                 st.current_title = title
                 st.is_loading = False
                 await ctx.send(f"\u25b6\ufe0f Now playing: **{title}**" + (f" (Loop: {st.loop_mode})" if st.loop_mode != "off" else ""))
+                print(f"ℹ️ Starting playback in guild {ctx.guild.id}: {title} ({audio_path})")
                 ctx.voice_client.play(source, after=self._make_after_callback(ctx))
                 self._schedule_prefetch(ctx)
             else:
@@ -511,7 +520,9 @@ class Music(commands.Cog):
     def _make_after_callback(self, ctx: commands.Context):
         def _after(error):
             if error:
-                print(f"\u274c Voice playback error: {error}")
+                print(f"\u274c Voice playback error in guild {ctx.guild.id}: {error}")
+            else:
+                print(f"ℹ️ Playback finished in guild {ctx.guild.id}")
             gc.collect() # Reclaim memory from the finished stream
             self._advance(ctx)
         return _after
@@ -737,6 +748,12 @@ class Music(commands.Cog):
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
         if member == self.bot.user:
+            before_channel = getattr(before.channel, "name", None)
+            after_channel = getattr(after.channel, "name", None)
+            print(
+                f"ℹ️ Bot voice state changed in guild {member.guild.id}: "
+                f"{before_channel} -> {after_channel}"
+            )
             return
         vc = member.guild.voice_client
         if not vc or not vc.is_connected():

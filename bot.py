@@ -242,7 +242,7 @@ async def get_guild_roster(session: aiohttp.ClientSession, realm: str, guild: st
     print(f"DEBUG: Found {len(members)} members in guild {guild}")
     return members
 
-blizzard_semaphore = asyncio.Semaphore(10) # Limit concurrent Blizzard profile requests
+blizzard_semaphore = asyncio.Semaphore(2) # Keep external API fan-out low on small VMs
 
 async def get_vault_data(session: aiohttp.ClientSession, name: str, realm: str) -> tuple:
     """Fetch M+ and Raid vault data from Raider.io and Blizzard API."""
@@ -393,14 +393,14 @@ async def build_guild_vault(session: aiohttp.ClientSession) -> str:
     if not guild:
         return "⚠️ Error fetching guild roster."
 
-    # Fetch all character data with limited concurrency to save CPU/Network on Cloud VM
-    semaphore = asyncio.Semaphore(3)
+    # Keep the overall guild refresh intentionally conservative so voice stays stable.
+    semaphore = asyncio.Semaphore(2)
 
     async def sem_fetch(char):
         async with semaphore:
             result = await fetch_char_stats(session, char)
-            # Small sleep to spread out CPU load
-            await asyncio.sleep(0.1)
+            # Spread work out so the event loop keeps servicing Discord voice.
+            await asyncio.sleep(0.25)
             return result
 
     tasks = [sem_fetch(char) for char in guild]
