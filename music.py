@@ -8,11 +8,13 @@ import tempfile
 import glob
 import time
 import gc
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
 
 TEMP_DIR = os.path.join(tempfile.gettempdir(), 'discord_music')
 os.makedirs(TEMP_DIR, exist_ok=True)
+logger = logging.getLogger("discordbot.music")
 
 # ── yt-dlp options ─────────────────────────────────────────────────────────────
 
@@ -57,7 +59,7 @@ def _get_yt_dlp_auth_config() -> dict:
 
     if cookies_path:
         if not os.path.exists(cookies_path):
-            print(f"\u26a0\ufe0f yt-dlp cookie file not found: {cookies_path}")
+            logger.warning("yt-dlp cookie file not found: %s", cookies_path)
         else:
             auth_options["cookiefile"] = cookies_path
 
@@ -84,9 +86,9 @@ def _build_ydl_options(base_options: dict) -> dict:
         options["js_runtimes"] = {js_runtime: {}}
 
     if auth_cfg.get("cookiefile"):
-        print(f"\u2705 Using cookies from: {auth_cfg['cookiefile']}")
+        logger.info("Using yt-dlp cookies from %s", auth_cfg["cookiefile"])
     elif base_options.get("cookiefile"):
-        print(f"\u2705 Using default cookies from: {base_options['cookiefile']}")
+        logger.info("Using default yt-dlp cookies from %s", base_options["cookiefile"])
 
     return options
 
@@ -110,6 +112,14 @@ def _normalize_query(value: str | None) -> str | None:
 
 def _clone_info(info: dict) -> dict:
     return dict(info)
+
+
+def _track_label(info: dict | None) -> str:
+    if not info:
+        return "unknown"
+    title = info.get("title") or "unknown"
+    video_id = info.get("id") or "unknown"
+    return f"{title} [{video_id}]"
 
 
 async def _read_cached_info(keys: list[str]) -> dict | None:
@@ -244,6 +254,7 @@ async def search_and_download(query: str, *, refresh: bool = False) -> tuple[dic
     except Exception as exc:
         # On failure, retry once with fallback options
         error_text = str(exc).lower()
+        logger.warning("yt-dlp primary extraction failed query=%r refresh=%s: %s", query, refresh, exc)
         if "requested format" in error_text:
             try:
                 def _do_fallback():
@@ -268,10 +279,12 @@ async def search_and_download(query: str, *, refresh: bool = False) -> tuple[dic
                 future.set_result((_clone_info(info), path))
                 return info, path
             except Exception as fallback_exc:
+                logger.exception("yt-dlp fallback extraction failed query=%r refresh=%s: %s", query, refresh, fallback_exc)
                 future.set_exception(fallback_exc)
                 future.exception()
                 raise fallback_exc
 
+        logger.exception("yt-dlp extraction failed query=%r refresh=%s: %s", query, refresh, exc)
         future.set_exception(exc)
         future.exception()
         raise
@@ -295,6 +308,11 @@ class GuildState:
         self.current_info: dict | None = None
         self.advance_lock = asyncio.Lock()
         self.prefetch_task: asyncio.Task | None = None
+        self.last_voice_channel_id: int | None = None
+        self.last_text_channel_id: int | None = None
+        self.playback_started_at: float | None = None
+        self.expected_disconnect_until: float = 0.0
+        self.recovery_lock = asyncio.Lock()
 
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
@@ -305,6 +323,7 @@ class Music(commands.Cog):
         self._states: dict[int, GuildState] = {}
         self._warmup_task: asyncio.Task | None = None
         self._cleanup_task: asyncio.Task | None = None
+        self._voice_watchdog_task: asyncio.Task | None = None
 
     def state(self, guild_id: int) -> GuildState:
         if guild_id not in self._states:
@@ -315,12 +334,15 @@ class Music(commands.Cog):
         cleanup_all()
         self._warmup_task = asyncio.create_task(self._warmup_extractors())
         self._cleanup_task = asyncio.create_task(self._periodic_cleanup())
+        self._voice_watchdog_task = asyncio.create_task(self._voice_watchdog())
 
     def cog_unload(self):
         if self._warmup_task and not self._warmup_task.done():
             self._warmup_task.cancel()
         if self._cleanup_task and not self._cleanup_task.done():
             self._cleanup_task.cancel()
+        if self._voice_watchdog_task and not self._voice_watchdog_task.done():
+            self._voice_watchdog_task.cancel()
         for st in self._states.values():
             if st.prefetch_task and not st.prefetch_task.done():
                 st.prefetch_task.cancel()
@@ -352,7 +374,7 @@ class Music(commands.Cog):
                 lambda: yt_dlp.YoutubeDL(_build_ydl_options(YDL_OPTIONS_FAST))._ies,
             )
             elapsed_ms = (time.perf_counter() - start) * 1000
-            print(f"\u2705 Music extractors warmed in {elapsed_ms:.0f}ms")
+            logger.info("Music extractors warmed in %.0fms", elapsed_ms)
 
             if _STARTUP_WARMUP_YOUTUBE:
                 start = time.perf_counter()
@@ -363,11 +385,213 @@ class Music(commands.Cog):
                     ),
                 )
                 elapsed_ms = (time.perf_counter() - start) * 1000
-                print(f"\u2705 Music YouTube warmup finished in {elapsed_ms:.0f}ms")
+                logger.info("Music YouTube warmup finished in %.0fms", elapsed_ms)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            print(f"\u26a0\ufe0f Music warmup failed: {exc}")
+            logger.warning("Music warmup failed: %s", exc)
+
+    def _mark_expected_disconnect(self, st: GuildState, *, seconds: float = 15.0):
+        st.expected_disconnect_until = time.monotonic() + seconds
+
+    def _remember_context(self, ctx: commands.Context):
+        st = self.state(ctx.guild.id)
+        st.last_text_channel_id = ctx.channel.id
+        author_voice = getattr(ctx.author, "voice", None)
+        if author_voice and author_voice.channel:
+            st.last_voice_channel_id = author_voice.channel.id
+
+    def _get_text_channel(self, guild: discord.Guild, st: GuildState):
+        if st.last_text_channel_id is None:
+            return None
+        return guild.get_channel(st.last_text_channel_id)
+
+    async def _connect_to_voice_channel(self, guild: discord.Guild, voice_channel: discord.VoiceChannel) -> bool:
+        vc = guild.voice_client
+        try:
+            if vc:
+                if vc.is_connected():
+                    if vc.channel != voice_channel:
+                        logger.info(
+                            "Moving voice client guild=%s from=%s to=%s",
+                            guild.id,
+                            vc.channel,
+                            voice_channel,
+                        )
+                        await vc.move_to(voice_channel)
+                    return True
+
+                logger.warning("Found ghost voice client in guild=%s; disconnecting it", guild.id)
+                self._mark_expected_disconnect(self.state(guild.id))
+                await vc.disconnect(force=True)
+
+            logger.info("Connecting voice client guild=%s channel=%s", guild.id, voice_channel)
+            await voice_channel.connect(timeout=60.0, reconnect=True)
+            self.state(guild.id).last_voice_channel_id = voice_channel.id
+            return True
+        except Exception as exc:
+            logger.exception("Voice connection failed guild=%s channel=%s: %s", guild.id, voice_channel, exc)
+            return False
+
+    def _create_audio_source(self, audio_path: str, volume: float, *, seek_seconds: int = 0):
+        before_options = "-nostdin -thread_queue_size 4096"
+        if seek_seconds > 0:
+            before_options += f" -ss {seek_seconds}"
+
+        volume_filter = f"volume={volume}"
+        try:
+            return discord.FFmpegOpusAudio(
+                audio_path,
+                before_options=before_options,
+                options=f"-vn -loglevel warning -af {volume_filter}",
+            )
+        except Exception as exc:
+            logger.warning("FFmpegOpusAudio failed for path=%s; falling back to PCMAudio: %s", audio_path, exc)
+            return discord.PCMVolumeTransformer(
+                discord.FFmpegPCMAudio(
+                    audio_path,
+                    before_options=before_options,
+                    options=f"-vn -loglevel warning -af {volume_filter}",
+                ),
+                volume=volume,
+            )
+
+    async def _start_playback(
+        self,
+        guild: discord.Guild,
+        info: dict,
+        *,
+        audio_path: str,
+        announce_channel=None,
+        announce_text: str | None = None,
+        seek_seconds: int = 0,
+    ):
+        st = self.state(guild.id)
+        vc = guild.voice_client
+        if not vc or not vc.is_connected():
+            raise RuntimeError("Voice client is not connected.")
+
+        source = self._create_audio_source(audio_path, st.volume, seek_seconds=seek_seconds)
+        title = info.get("title", "Unknown")
+
+        st.current_info = info
+        st.current_file = audio_path
+        st.current_title = title
+        st.is_loading = False
+        st.playback_started_at = time.monotonic() - max(seek_seconds, 0)
+
+        if announce_channel and announce_text:
+            await announce_channel.send(announce_text)
+
+        logger.info(
+            "Starting playback guild=%s track=%s path=%s seek=%ss volume=%.2f",
+            guild.id,
+            _track_label(info),
+            audio_path,
+            seek_seconds,
+            st.volume,
+        )
+        vc.play(source, after=self._make_after_callback(guild.id))
+        self._schedule_prefetch(guild.id)
+
+    async def _recover_voice_connection(self, guild_id: int, *, reason: str):
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            return
+
+        st = self.state(guild_id)
+        async with st.recovery_lock:
+            vc = guild.voice_client
+            if vc and vc.is_connected() and (vc.is_playing() or vc.is_paused()):
+                return
+
+            if not st.current_info and not st.queue:
+                return
+
+            if st.last_voice_channel_id is None:
+                logger.warning("Cannot recover voice guild=%s: no saved voice channel", guild_id)
+                return
+
+            voice_channel = guild.get_channel(st.last_voice_channel_id)
+            if not isinstance(voice_channel, discord.VoiceChannel):
+                logger.warning(
+                    "Cannot recover voice guild=%s: channel_id=%s not found",
+                    guild_id,
+                    st.last_voice_channel_id,
+                )
+                return
+
+            logger.warning(
+                "Attempting voice recovery guild=%s reason=%s current_track=%s queue_len=%s",
+                guild_id,
+                reason,
+                _track_label(st.current_info),
+                len(st.queue),
+            )
+            if not await self._connect_to_voice_channel(guild, voice_channel):
+                return
+
+            text_channel = self._get_text_channel(guild, st)
+            if st.current_info and st.current_file and os.path.exists(st.current_file):
+                seek_seconds = 0
+                if st.playback_started_at is not None:
+                    seek_seconds = max(0, int(time.monotonic() - st.playback_started_at - 2))
+                try:
+                    await self._start_playback(
+                        guild,
+                        _clone_info(st.current_info),
+                        audio_path=st.current_file,
+                        announce_channel=text_channel,
+                        announce_text="⚠️ Voice connection dropped. Reconnected and resumed the current track.",
+                        seek_seconds=seek_seconds,
+                    )
+                    return
+                except Exception as exc:
+                    logger.exception(
+                        "Failed to resume current track guild=%s track=%s: %s",
+                        guild_id,
+                        _track_label(st.current_info),
+                        exc,
+                    )
+
+            if st.queue:
+                next_info = st.queue.popleft()
+                try:
+                    await self._play_track_for_guild(
+                        guild,
+                        next_info,
+                        text_channel=text_channel,
+                        ensure_voice=False,
+                        status_message="⚠️ Voice connection dropped. Reconnected and continuing with the queue.",
+                    )
+                except Exception as exc:
+                    logger.exception(
+                        "Failed to continue queue after reconnect guild=%s next_track=%s: %s",
+                        guild_id,
+                        _track_label(next_info),
+                        exc,
+                    )
+
+    async def _voice_watchdog(self):
+        try:
+            while True:
+                await asyncio.sleep(15)
+                for guild_id, st in list(self._states.items()):
+                    if time.monotonic() < st.expected_disconnect_until:
+                        continue
+                    if not st.current_info:
+                        continue
+                    guild = self.bot.get_guild(guild_id)
+                    if guild is None:
+                        continue
+                    vc = guild.voice_client
+                    if vc is None or not vc.is_connected():
+                        await self._recover_voice_connection(
+                            guild_id,
+                            reason="watchdog detected disconnected voice client",
+                        )
+        except asyncio.CancelledError:
+            pass
 
     async def cog_check(self, ctx: commands.Context) -> bool:
         """Restrict music commands to one text channel per guild."""
@@ -388,51 +612,62 @@ class Music(commands.Cog):
 
     async def _ensure_voice(self, ctx: commands.Context) -> bool:
         """Connect/move to the author's voice channel. Returns False on failure."""
+        self._remember_context(ctx)
         try:
-            if ctx.voice_client:
-                if ctx.voice_client.is_connected():
-                    # Move if author is in a different channel
-                    if ctx.author.voice and ctx.voice_client.channel != ctx.author.voice.channel:
-                        print(
-                            f"ℹ️ Moving voice client in guild {ctx.guild.id} "
-                            f"from {ctx.voice_client.channel} to {ctx.author.voice.channel}"
-                        )
-                        await ctx.voice_client.move_to(ctx.author.voice.channel)
-                    return True
-                else:
-                    # Clean up "ghost" connection
-                    print(f"⚠️ Found ghost voice client in guild {ctx.guild.id}, disconnecting it")
-                    await ctx.voice_client.disconnect(force=True)
-
             if not ctx.author.voice:
                 await ctx.send("\u274c Join a voice channel first.")
                 return False
 
-            print(f"ℹ️ Connecting voice client in guild {ctx.guild.id} to {ctx.author.voice.channel}")
-            await ctx.author.voice.channel.connect(timeout=60.0, reconnect=True)
-            return True
+            connected = await self._connect_to_voice_channel(ctx.guild, ctx.author.voice.channel)
+            if not connected:
+                await ctx.send("\u274c Voice connection failed.")
+            return connected
         except discord.ClientException as exc:
             await ctx.send(f"\u274c Could not join voice: {exc}")
-            print(f"❌ Could not join voice in guild {ctx.guild.id}: {exc}")
+            logger.exception("Could not join voice guild=%s: %s", ctx.guild.id, exc)
             return False
         except Exception as exc:
             await ctx.send(f"\u274c Voice connection failed: {exc}")
-            print(f"❌ Voice connection failed in guild {ctx.guild.id}: {exc}")
+            logger.exception("Voice connection failed guild=%s: %s", ctx.guild.id, exc)
             return False
         return True
 
     async def _play_track(self, ctx: commands.Context, info: dict, *, ensure_voice: bool = True):
-        """Start playing a track from a downloaded file."""
-        st = self.state(ctx.guild.id)
+        self._remember_context(ctx)
+        await self._play_track_for_guild(
+            ctx.guild,
+            info,
+            text_channel=ctx.channel,
+            ensure_voice=ensure_voice,
+        )
 
-        if ensure_voice and not await self._ensure_voice(ctx):
-            return
+    async def _play_track_for_guild(
+        self,
+        guild: discord.Guild,
+        info: dict,
+        *,
+        text_channel=None,
+        ensure_voice: bool = True,
+        status_message: str | None = None,
+    ):
+        """Start playing a track from a downloaded file."""
+        st = self.state(guild.id)
+
+        if ensure_voice:
+            voice_channel = guild.get_channel(st.last_voice_channel_id) if st.last_voice_channel_id else None
+            if not isinstance(voice_channel, discord.VoiceChannel):
+                if text_channel:
+                    await text_channel.send("\u274c Join a voice channel first.")
+                return
+            if not await self._connect_to_voice_channel(guild, voice_channel):
+                if text_channel:
+                    await text_channel.send("\u274c Voice connection failed.")
+                return
 
         st.is_loading = True
         st.current_info = info
         title = info.get('title', 'Unknown')
 
-        # Get audio path — may already be downloaded by prefetch or play command
         audio_path = info.get('_audio_path')
         if not audio_path or not os.path.exists(audio_path):
             try:
@@ -441,60 +676,47 @@ class Music(commands.Cog):
                 st.current_info = info
                 title = info.get('title', title)
             except Exception as e:
-                await ctx.send(f"\u274c Could not download track: {e}")
+                if text_channel:
+                    await text_channel.send(f"\u274c Could not download track: {e}")
                 st.is_loading = False
-                self._advance(ctx)
+                self._advance(guild.id)
                 return
 
         st.current_file = audio_path
 
-        # Using FFmpeg filters for volume control to allow using FFmpegOpusAudio
-        # This is much more CPU efficient on e2-micro instances
-        volume_filter = f'volume={st.volume}'
-        
         try:
-            source = discord.FFmpegOpusAudio(
-                audio_path,
-                before_options='-nostdin -thread_queue_size 4096',
-                options=f'-vn -loglevel warning -af {volume_filter}'
-            )
-        except Exception as e:
-            print(f"DEBUG: FFmpegOpusAudio failed, falling back to PCMAudio: {e}")
-            source = discord.PCMVolumeTransformer(
-                discord.FFmpegPCMAudio(
-                    audio_path,
-                    before_options='-nostdin -thread_queue_size 4096',
-                    options=f'-vn -loglevel warning -af {volume_filter}'
-                ),
-                volume=st.volume
-            )
-
-        try:
-            if ctx.voice_client:
-                st.current_title = title
-                st.is_loading = False
-                await ctx.send(f"\u25b6\ufe0f Now playing: **{title}**" + (f" (Loop: {st.loop_mode})" if st.loop_mode != "off" else ""))
-                print(f"ℹ️ Starting playback in guild {ctx.guild.id}: {title} ({audio_path})")
-                ctx.voice_client.play(source, after=self._make_after_callback(ctx))
-                self._schedule_prefetch(ctx)
+            if guild.voice_client:
+                loop_suffix = f" (Loop: {st.loop_mode})" if st.loop_mode != "off" else ""
+                announce_text = status_message or (
+                    f"\u25b6\ufe0f Now playing: **{title}**{loop_suffix}" if text_channel else None
+                )
+                await self._start_playback(
+                    guild,
+                    info,
+                    audio_path=audio_path,
+                    announce_channel=text_channel,
+                    announce_text=announce_text,
+                )
             else:
                 st.current_title = None
                 st.is_loading = False
         except Exception as exc:
-            await ctx.send(f"\u274c Playback failed: {exc}")
+            if text_channel:
+                await text_channel.send(f"\u274c Playback failed: {exc}")
             st.current_title = None
             st.is_loading = False
-            self._advance(ctx)
+            self._advance(guild.id)
 
-    def _schedule_prefetch(self, ctx: commands.Context):
-        st = self.state(ctx.guild.id)
+    def _schedule_prefetch(self, guild_ref):
+        guild_id = guild_ref.guild.id if hasattr(guild_ref, "guild") else guild_ref
+        st = self.state(guild_id)
         if st.prefetch_task and not st.prefetch_task.done():
             return
-        st.prefetch_task = self.bot.loop.create_task(self._prefetch_next(ctx))
+        st.prefetch_task = self.bot.loop.create_task(self._prefetch_next(guild_id))
 
-    async def _prefetch_next(self, ctx: commands.Context):
+    async def _prefetch_next(self, guild_id: int):
         """Pre-download audio for the next track while current plays."""
-        st = self.state(ctx.guild.id)
+        st = self.state(guild_id)
         current_task = asyncio.current_task()
         try:
             # Small delay to let the current playback stabilize
@@ -510,29 +732,37 @@ class Music(commands.Cog):
                     if st.queue and st.queue[0] is next_track:
                         st.queue[0].update(info)
                         st.queue[0]['_audio_path'] = path
-                        print(f"\u2705 Prefetched: {info.get('title')}")
+                        logger.info("Prefetched next track guild=%s track=%s", guild_id, _track_label(info))
             except Exception as e:
-                print(f"\u26a0\ufe0f Prefetch failed: {e}")
+                logger.warning("Prefetch failed guild=%s track=%s: %s", guild_id, _track_label(next_track), e)
         finally:
             if st.prefetch_task is current_task:
                 st.prefetch_task = None
 
-    def _make_after_callback(self, ctx: commands.Context):
+    def _make_after_callback(self, guild_id: int):
         def _after(error):
             if error:
-                print(f"\u274c Voice playback error in guild {ctx.guild.id}: {error}")
+                logger.warning("Voice playback error guild=%s: %s", guild_id, error)
             else:
-                print(f"ℹ️ Playback finished in guild {ctx.guild.id}")
+                logger.info("Playback finished guild=%s", guild_id)
             gc.collect() # Reclaim memory from the finished stream
-            self._advance(ctx)
+            asyncio.run_coroutine_threadsafe(self._handle_after(guild_id, error), self.bot.loop)
         return _after
 
-    def _advance(self, ctx: commands.Context):
-        """Called when a track ends \u2014 pops the next item from the queue."""
-        asyncio.run_coroutine_threadsafe(self._advance_async(ctx), self.bot.loop)
+    async def _handle_after(self, guild_id: int, error):
+        guild = self.bot.get_guild(guild_id)
+        vc = guild.voice_client if guild else None
+        if error and (vc is None or not vc.is_connected()):
+            await self._recover_voice_connection(guild_id, reason=f"playback error: {error}")
+            return
+        self._advance(guild_id)
 
-    async def _advance_async(self, ctx: commands.Context):
-        st = self.state(ctx.guild.id)
+    def _advance(self, guild_id: int):
+        """Called when a track ends \u2014 pops the next item from the queue."""
+        asyncio.run_coroutine_threadsafe(self._advance_async(guild_id), self.bot.loop)
+
+    async def _advance_async(self, guild_id: int):
+        st = self.state(guild_id)
         async with st.advance_lock:
             next_info = None
             if st.loop_mode == "song" and st.current_info:
@@ -551,10 +781,18 @@ class Music(commands.Cog):
                 else:
                     st.current_title = None
                     st.current_info = None
+                    st.current_file = None
                     st.is_loading = False
+                    st.playback_started_at = None
 
         if next_info:
-            await self._play_track(ctx, next_info)
+            guild = self.bot.get_guild(guild_id)
+            if guild is not None:
+                await self._play_track_for_guild(
+                    guild,
+                    next_info,
+                    text_channel=self._get_text_channel(guild, st),
+                )
 
     # ── commands ─────────────────────────────────────────────────────────────
 
@@ -571,23 +809,30 @@ class Music(commands.Cog):
             return
 
         st = self.state(ctx.guild.id)
-        print(f"DEBUG: !play command start for '{query}'")
+        self._remember_context(ctx)
+        logger.info("Play command guild=%s user=%s query=%r", ctx.guild.id, ctx.author.id, query)
 
         async with ctx.typing():
             try:
                 s_start = time.perf_counter()
                 voice_ok = await self._ensure_voice(ctx)
-                print(f"DEBUG: Voice took {time.perf_counter() - s_start:.2f}s")
+                logger.info("Voice prepare guild=%s took %.2fs", ctx.guild.id, time.perf_counter() - s_start)
 
                 s_dl = time.perf_counter()
                 info, audio_path = await search_and_download(query)
                 elapsed = time.perf_counter() - s_dl
-                print(f"DEBUG: Search+download took {elapsed:.2f}s -> {audio_path}")
+                logger.info(
+                    "Search+download guild=%s query=%r took %.2fs path=%s",
+                    ctx.guild.id,
+                    query,
+                    elapsed,
+                    audio_path,
+                )
 
                 info['original_url'] = query
                 info['_audio_path'] = audio_path
             except Exception as e:
-                print(f"DEBUG: Error loading track: {e}")
+                logger.exception("Error loading track guild=%s query=%r: %s", ctx.guild.id, query, e)
                 return await ctx.send(f"\u274c Could not load track: {e}")
 
         if not voice_ok:
@@ -621,7 +866,7 @@ class Music(commands.Cog):
         elif st.is_loading:
             await ctx.send("\u23f3 Currently loading the next song... please wait.")
         elif st.queue:
-            self._advance(ctx)
+            self._advance(ctx.guild.id)
             await ctx.send("\u23ed\ufe0f Skipped (manual advance).")
         else:
             await ctx.send("\u274c Nothing is playing.")
@@ -685,11 +930,13 @@ class Music(commands.Cog):
     async def stop(self, ctx):
         """Stop playback, clear the queue, and leave."""
         st = self.state(ctx.guild.id)
+        self._mark_expected_disconnect(st)
         st.queue.clear()
         st.current_title = None
         st.current_info = None
         st.current_file = None
         st.is_loading = False
+        st.playback_started_at = None
         if st.prefetch_task and not st.prefetch_task.done():
             st.prefetch_task.cancel()
             st.prefetch_task = None
@@ -748,12 +995,28 @@ class Music(commands.Cog):
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
         if member == self.bot.user:
+            st = self.state(member.guild.id)
             before_channel = getattr(before.channel, "name", None)
             after_channel = getattr(after.channel, "name", None)
-            print(
-                f"ℹ️ Bot voice state changed in guild {member.guild.id}: "
-                f"{before_channel} -> {after_channel}"
+            logger.info(
+                "Bot voice state changed guild=%s before=%s after=%s",
+                member.guild.id,
+                before_channel,
+                after_channel,
             )
+            if after.channel is not None:
+                st.last_voice_channel_id = after.channel.id
+            elif (
+                before.channel is not None
+                and time.monotonic() >= st.expected_disconnect_until
+                and (st.current_info or st.queue)
+            ):
+                self.bot.loop.create_task(
+                    self._recover_voice_connection(
+                        member.guild.id,
+                        reason="voice_state_update detected unexpected disconnect",
+                    )
+                )
             return
         vc = member.guild.voice_client
         if not vc or not vc.is_connected():
@@ -762,11 +1025,13 @@ class Music(commands.Cog):
             await asyncio.sleep(60)
             if vc.is_connected() and len([m for m in vc.channel.members if not m.bot]) == 0:
                 st = self.state(member.guild.id)
+                self._mark_expected_disconnect(st)
                 st.queue.clear()
                 st.current_title = None
                 st.current_info = None
                 st.current_file = None
                 st.is_loading = False
+                st.playback_started_at = None
                 if st.prefetch_task and not st.prefetch_task.done():
                     st.prefetch_task.cancel()
                     st.prefetch_task = None

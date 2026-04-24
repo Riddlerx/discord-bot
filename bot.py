@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 import asyncio
 import aiohttp
 import time
+import logging
 from typing import Optional, Dict, List
 import urllib.parse
 
@@ -38,6 +39,23 @@ WELCOME_MESSAGES = [
 
 import json
 
+
+def setup_logging() -> None:
+    level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    )
+    logging.getLogger("discord").setLevel(logging.INFO)
+    logging.getLogger("discord.voice_state").setLevel(logging.INFO)
+    logging.getLogger("discord.gateway").setLevel(logging.WARNING)
+    logging.getLogger("aiohttp").setLevel(logging.WARNING)
+
+
+setup_logging()
+logger = logging.getLogger("discordbot")
+
 # Global Caches & State
 raider_cache: Dict[str, tuple] = {}
 CACHE_DURATION = 1800  # 30 minutes
@@ -69,7 +87,7 @@ def load_state():
                 GUILD_VAULT_MESSAGE_ID = state.get("guild_vault_message_id")
                 LAST_CONTENT = state.get("last_content")
         except Exception as e:
-            print(f"⚠️ Error loading state: {e}")
+            logger.warning("Error loading state: %s", e)
 
 load_state()
 
@@ -97,19 +115,19 @@ def ensure_voice_dependencies() -> None:
         for candidate in ("libopus.so.0", "libopus.so"):
             try:
                 discord.opus.load_opus(candidate)
-                print(f"✅ Loaded Opus library: {candidate}")
+                logger.info("Loaded Opus library: %s", candidate)
                 break
             except OSError:
                 continue
         else:
-            print("⚠️ Opus library could not be loaded. Voice playback may fail.")
+            logger.warning("Opus library could not be loaded. Voice playback may fail.")
 
     # Check Davey (for E2EE voice support in newer discord.py versions)
     try:
         import davey
-        print(f"✅ Davey library found (v{getattr(davey, '__version__', 'unknown')})")
+        logger.info("Davey library found (v%s)", getattr(davey, "__version__", "unknown"))
     except ImportError:
-        print("⚠️ Davey library not found. Voice connection might fail with 'davey library needed'.")
+        logger.warning("Davey library not found. Voice connection might fail with 'davey library needed'.")
 
 # ... (rest of global state)
 
@@ -579,10 +597,20 @@ async def on_ready():
     global auto_update_task
 
     startup_elapsed = time.perf_counter() - STARTUP_MONOTONIC
-    print(f"Bot connected as {bot.user} in {startup_elapsed:.2f}s")
+    logger.info("Bot connected as %s in %.2fs", bot.user, startup_elapsed)
 
     if auto_update_task is None or auto_update_task.done():
         auto_update_task = bot.loop.create_task(auto_update())
+
+
+@bot.event
+async def on_disconnect():
+    logger.warning("Discord gateway disconnected")
+
+
+@bot.event
+async def on_resumed():
+    logger.info("Discord gateway session resumed")
 
 async def auto_update():
     await bot.wait_until_ready()
@@ -613,12 +641,12 @@ async def auto_update():
                     await message.edit(content=new_content)
                     LAST_CONTENT = new_content
                     save_state()
-                    print("✅ Updated leaderboard")
+                    logger.info("Updated leaderboard message_id=%s", GUILD_VAULT_MESSAGE_ID)
                 else:
-                    print("⏸ No changes detected")
+                    logger.info("No leaderboard changes detected")
 
             except Exception as e:
-                print(f"❌ Update error: {e}")
+                logger.exception("Leaderboard update error: %s", e)
 
             await asyncio.sleep(1800)
 
@@ -859,12 +887,12 @@ async def price(ctx, *, search: str):
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
         return
-    print(f"❌ Command Error: {error}")
+    logger.exception("Command error: %s", error)
     await ctx.send(f"⚠️ Error: {error}")
 
 if __name__ == "__main__":
     if not DISCORD_BOT_TOKEN:
-        print("❌ DISCORD_BOT_TOKEN not found in environment.")
+        logger.error("DISCORD_BOT_TOKEN not found in environment.")
     else:
         async def main():
             async with bot:
@@ -875,11 +903,11 @@ if __name__ == "__main__":
                 if enable_music:
                     try:
                         await bot.load_extension('music')
-                        print("✅ Music extension loaded")
+                        logger.info("Music extension loaded")
                     except Exception as e:
-                        print(f"❌ Failed to load music extension: {e}")
+                        logger.exception("Failed to load music extension: %s", e)
                 else:
-                    print("ℹ️ Music features are disabled in this environment.")
+                    logger.info("Music features are disabled in this environment.")
                 
                 await bot.start(DISCORD_BOT_TOKEN)
         
