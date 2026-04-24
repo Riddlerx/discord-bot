@@ -15,6 +15,8 @@ from collections import deque
 TEMP_DIR = os.path.join(tempfile.gettempdir(), 'discord_music')
 os.makedirs(TEMP_DIR, exist_ok=True)
 logger = logging.getLogger("discordbot.music")
+AUTO_DISCONNECT_WHEN_EMPTY = os.getenv("AUTO_DISCONNECT_WHEN_EMPTY", "true").strip().lower() in ("1", "true", "yes", "on")
+AUTO_DISCONNECT_EMPTY_DELAY = int(os.getenv("AUTO_DISCONNECT_EMPTY_DELAY", "60"))
 
 # ── yt-dlp options ─────────────────────────────────────────────────────────────
 
@@ -992,6 +994,9 @@ class Music(commands.Cog):
         else:
             await ctx.send("\u274c Nothing is playing.")
 
+    def _human_members(self, voice_channel) -> list[discord.Member]:
+        return [m for m in voice_channel.members if not m.bot]
+
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
         if member == self.bot.user:
@@ -1018,14 +1023,36 @@ class Music(commands.Cog):
                     )
                 )
             return
+        if not AUTO_DISCONNECT_WHEN_EMPTY:
+            return
         vc = member.guild.voice_client
         if not vc or not vc.is_connected():
             return
-        if len([m for m in vc.channel.members if not m.bot]) == 0:
-            await asyncio.sleep(60)
-            if vc.is_connected() and len([m for m in vc.channel.members if not m.bot]) == 0:
+        humans_now = self._human_members(vc.channel)
+        if not humans_now:
+            logger.warning(
+                "Voice channel became empty guild=%s channel=%s trigger_member=%s waiting=%ss current_track=%s queue_len=%s",
+                member.guild.id,
+                vc.channel,
+                member.id,
+                AUTO_DISCONNECT_EMPTY_DELAY,
+                _track_label(self.state(member.guild.id).current_info),
+                len(self.state(member.guild.id).queue),
+            )
+            await asyncio.sleep(AUTO_DISCONNECT_EMPTY_DELAY)
+            if vc.is_connected():
+                humans_after = self._human_members(vc.channel)
+            else:
+                humans_after = []
+            if vc.is_connected() and not humans_after:
                 st = self.state(member.guild.id)
                 self._mark_expected_disconnect(st)
+                logger.warning(
+                    "Disconnecting because voice channel stayed empty guild=%s channel=%s delay=%ss",
+                    member.guild.id,
+                    vc.channel,
+                    AUTO_DISCONNECT_EMPTY_DELAY,
+                )
                 st.queue.clear()
                 st.current_title = None
                 st.current_info = None
@@ -1038,6 +1065,13 @@ class Music(commands.Cog):
                 await vc.disconnect()
                 cleanup_all()
                 gc.collect()
+            else:
+                logger.info(
+                    "Keeping voice connection guild=%s channel=%s humans_after_wait=%s",
+                    member.guild.id,
+                    vc.channel if vc.is_connected() else "disconnected",
+                    [m.id for m in humans_after],
+                )
 
 
 async def setup(bot):
