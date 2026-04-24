@@ -315,6 +315,7 @@ class GuildState:
         self.playback_started_at: float | None = None
         self.expected_disconnect_until: float = 0.0
         self.recovery_lock = asyncio.Lock()
+        self.empty_disconnect_task: asyncio.Task | None = None
 
 
 # ── Cog ───────────────────────────────────────────────────────────────────────
@@ -348,6 +349,8 @@ class Music(commands.Cog):
         for st in self._states.values():
             if st.prefetch_task and not st.prefetch_task.done():
                 st.prefetch_task.cancel()
+            if st.empty_disconnect_task and not st.empty_disconnect_task.done():
+                st.empty_disconnect_task.cancel()
 
     async def _periodic_cleanup(self):
         """Periodically remove old audio files to save disk space."""
@@ -407,6 +410,21 @@ class Music(commands.Cog):
         if st.last_text_channel_id is None:
             return None
         return guild.get_channel(st.last_text_channel_id)
+
+    def _non_bot_voice_user_ids(self, voice_channel) -> list[int]:
+        bot_user_id = self.bot.user.id if self.bot.user else None
+        return [user_id for user_id in voice_channel.voice_states.keys() if user_id != bot_user_id]
+
+    def _cancel_empty_disconnect(self, st: GuildState):
+        if st.empty_disconnect_task and not st.empty_disconnect_task.done():
+            st.empty_disconnect_task.cancel()
+        st.empty_disconnect_task = None
+
+    def _schedule_empty_disconnect(self, guild: discord.Guild):
+        st = self.state(guild.id)
+        if st.empty_disconnect_task and not st.empty_disconnect_task.done():
+            return
+        st.empty_disconnect_task = self.bot.loop.create_task(self._empty_disconnect_watch(guild.id))
 
     async def _connect_to_voice_channel(self, guild: discord.Guild, voice_channel: discord.VoiceChannel) -> bool:
         vc = guild.voice_client
@@ -594,6 +612,79 @@ class Music(commands.Cog):
                         )
         except asyncio.CancelledError:
             pass
+
+    async def _empty_disconnect_watch(self, guild_id: int):
+        st = self.state(guild_id)
+        try:
+            guild = self.bot.get_guild(guild_id)
+            if guild is None:
+                return
+            vc = guild.voice_client
+            if not vc or not vc.is_connected():
+                return
+
+            non_bot_ids = self._non_bot_voice_user_ids(vc.channel)
+            if non_bot_ids:
+                logger.info(
+                    "Skipping empty-channel timer guild=%s channel=%s non_bot_ids=%s",
+                    guild_id,
+                    vc.channel,
+                    non_bot_ids,
+                )
+                return
+
+            logger.warning(
+                "Voice channel became empty guild=%s channel=%s waiting=%ss current_track=%s queue_len=%s",
+                guild_id,
+                vc.channel,
+                AUTO_DISCONNECT_EMPTY_DELAY,
+                _track_label(st.current_info),
+                len(st.queue),
+            )
+
+            await asyncio.sleep(AUTO_DISCONNECT_EMPTY_DELAY)
+
+            guild = self.bot.get_guild(guild_id)
+            if guild is None:
+                return
+            vc = guild.voice_client
+            if not vc or not vc.is_connected():
+                return
+
+            non_bot_ids = self._non_bot_voice_user_ids(vc.channel)
+            if non_bot_ids:
+                logger.info(
+                    "Keeping voice connection guild=%s channel=%s non_bot_ids_after_wait=%s",
+                    guild_id,
+                    vc.channel,
+                    non_bot_ids,
+                )
+                return
+
+            self._mark_expected_disconnect(st)
+            logger.warning(
+                "Disconnecting because voice channel stayed empty guild=%s channel=%s delay=%ss",
+                guild_id,
+                vc.channel,
+                AUTO_DISCONNECT_EMPTY_DELAY,
+            )
+            st.queue.clear()
+            st.current_title = None
+            st.current_info = None
+            st.current_file = None
+            st.is_loading = False
+            st.playback_started_at = None
+            if st.prefetch_task and not st.prefetch_task.done():
+                st.prefetch_task.cancel()
+                st.prefetch_task = None
+            await vc.disconnect()
+            cleanup_all()
+            gc.collect()
+        except asyncio.CancelledError:
+            logger.info("Cancelled empty-channel timer guild=%s", guild_id)
+        finally:
+            if st.empty_disconnect_task is asyncio.current_task():
+                st.empty_disconnect_task = None
 
     async def cog_check(self, ctx: commands.Context) -> bool:
         """Restrict music commands to one text channel per guild."""
@@ -994,9 +1085,6 @@ class Music(commands.Cog):
         else:
             await ctx.send("\u274c Nothing is playing.")
 
-    def _human_members(self, voice_channel) -> list[discord.Member]:
-        return [m for m in voice_channel.members if not m.bot]
-
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
         if member == self.bot.user:
@@ -1028,50 +1116,26 @@ class Music(commands.Cog):
         vc = member.guild.voice_client
         if not vc or not vc.is_connected():
             return
-        humans_now = self._human_members(vc.channel)
-        if not humans_now:
-            logger.warning(
-                "Voice channel became empty guild=%s channel=%s trigger_member=%s waiting=%ss current_track=%s queue_len=%s",
+        current_channel_id = vc.channel.id
+        before_id = getattr(before.channel, "id", None)
+        after_id = getattr(after.channel, "id", None)
+        if before_id != current_channel_id and after_id != current_channel_id:
+            return
+
+        st = self.state(member.guild.id)
+        non_bot_ids = self._non_bot_voice_user_ids(vc.channel)
+        if non_bot_ids:
+            logger.info(
+                "Voice channel still occupied guild=%s channel=%s non_bot_ids=%s trigger_member=%s",
                 member.guild.id,
                 vc.channel,
+                non_bot_ids,
                 member.id,
-                AUTO_DISCONNECT_EMPTY_DELAY,
-                _track_label(self.state(member.guild.id).current_info),
-                len(self.state(member.guild.id).queue),
             )
-            await asyncio.sleep(AUTO_DISCONNECT_EMPTY_DELAY)
-            if vc.is_connected():
-                humans_after = self._human_members(vc.channel)
-            else:
-                humans_after = []
-            if vc.is_connected() and not humans_after:
-                st = self.state(member.guild.id)
-                self._mark_expected_disconnect(st)
-                logger.warning(
-                    "Disconnecting because voice channel stayed empty guild=%s channel=%s delay=%ss",
-                    member.guild.id,
-                    vc.channel,
-                    AUTO_DISCONNECT_EMPTY_DELAY,
-                )
-                st.queue.clear()
-                st.current_title = None
-                st.current_info = None
-                st.current_file = None
-                st.is_loading = False
-                st.playback_started_at = None
-                if st.prefetch_task and not st.prefetch_task.done():
-                    st.prefetch_task.cancel()
-                    st.prefetch_task = None
-                await vc.disconnect()
-                cleanup_all()
-                gc.collect()
-            else:
-                logger.info(
-                    "Keeping voice connection guild=%s channel=%s humans_after_wait=%s",
-                    member.guild.id,
-                    vc.channel if vc.is_connected() else "disconnected",
-                    [m.id for m in humans_after],
-                )
+            self._cancel_empty_disconnect(st)
+            return
+
+        self._schedule_empty_disconnect(member.guild)
 
 
 async def setup(bot):
