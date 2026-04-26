@@ -50,9 +50,12 @@ YDL_OPTIONS_FAST = {
     'proxy': os.getenv("YTDLP_PROXY"),
     'extractor_args': {
         'youtube': {
-            'player_client': ['android', 'web'], # Android is often faster than web
+            'player_client': ['ios'],
+            'skip': ['webpage', 'configs'],
         }
     },
+    'lazy_playlist': True,
+    'playlist_items': '1',
     'noprogress': True,
     'no_part': True,
     'buffersize': 16384,
