@@ -446,8 +446,8 @@ class Music(commands.Cog):
             return False
 
     def _create_audio_source(self, audio_path: str, volume: float, *, seek_seconds: int = 0):
-        # Optimized for streaming URLs
-        before_options = "-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -thread_queue_size 8192"
+        # Optimized for local files (since we are in download mode)
+        before_options = "-nostdin -thread_queue_size 8192"
         if seek_seconds > 0:
             before_options += f" -ss {seek_seconds}"
 
