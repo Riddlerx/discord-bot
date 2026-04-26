@@ -34,11 +34,11 @@ YDL_OPTIONS_FAST = {
     'concurrent_fragment_downloads': 5,
     # GCP Speed Optimizations
     'nocheckcertificate': True,
-    'youtube_include_dash_manifest': True,
+    'youtube_include_dash_manifest': False,
     'youtube_include_hls_manifest': False,
     'check_formats': 'cached',
     # Minimal extraction for speed
-    'extract_flat': False,
+    'extract_flat': 'in_playlist',
     'skip_download': False,
     'writethumbnail': False,
     'writesubtitles': False,
@@ -50,11 +50,12 @@ YDL_OPTIONS_FAST = {
     'proxy': os.getenv("YTDLP_PROXY"),
     'extractor_args': {
         'youtube': {
-            'player_client': ['android', 'ios', 'web'],
+            'player_client': ['android', 'web'],
         }
     },
     'lazy_playlist': True,
     'playlist_items': '1',
+    'noplaylist': True,
     'noprogress': True,
     'no_part': True,
     'buffersize': 16384,
@@ -243,8 +244,13 @@ async def search_and_download(query: str, *, refresh: bool = False) -> tuple[dic
 
         def _do_search_and_download():
             opts = _build_ydl_options(YDL_OPTIONS_FAST)
+            
+            # Optimization: If the query is already a URL, don't use the search engine
+            if query.startswith(('http://', 'https://')):
+                opts['default_search'] = 'auto'
+            
             with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(query, download=True)  # Back to Download Mode for stability
+                info = ydl.extract_info(query, download=True)
 
             if info and 'entries' in info:
                 if not info['entries']:
