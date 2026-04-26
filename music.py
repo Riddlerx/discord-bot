@@ -37,8 +37,7 @@ YDL_OPTIONS_FAST = {
     'proxy': os.getenv("YTDLP_PROXY"),
     'extractor_args': {
         'youtube': {
-            'player_client': ['ios', 'android', 'web', 'tv'],
-            'player_skip': ['webpage', 'configs'],
+            'player_client': ['web'],
         }
     },
     'noprogress': True,
@@ -230,7 +229,7 @@ async def search_and_download(query: str, *, refresh: bool = False) -> tuple[dic
         def _do_search_and_download():
             opts = _build_ydl_options(YDL_OPTIONS_FAST)
             with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(query, download=False)  # Streaming mode
+                info = ydl.extract_info(query, download=True)  # Download mode for caching
 
             if info and 'entries' in info:
                 if not info['entries']:
@@ -240,12 +239,11 @@ async def search_and_download(query: str, *, refresh: bool = False) -> tuple[dic
             if not info or not info.get('id'):
                 raise Exception("Could not extract video info.")
 
-            # Get the streaming URL
-            url = info.get('url')
-            if not url:
-                 raise Exception(f"No streaming URL found for {info.get('id')}")
+            path = get_audio_path(info['id'])
+            if not path:
+                raise Exception(f"Download finished but file not found for {info.get('id')}")
 
-            return info, url
+            return info, path
 
         async with _extract_semaphore:
             info, path = await loop.run_in_executor(_ydl_executor, _do_search_and_download)
@@ -263,17 +261,17 @@ async def search_and_download(query: str, *, refresh: bool = False) -> tuple[dic
                 def _do_fallback():
                     opts = _build_ydl_options(YDL_OPTIONS_FALLBACK)
                     with yt_dlp.YoutubeDL(opts) as ydl:
-                        info = ydl.extract_info(query, download=False)
+                        info = ydl.extract_info(query, download=True)
                     if info and 'entries' in info:
                         if not info['entries']:
                             raise Exception("No results found.")
                         info = info['entries'][0]
                     if not info or not info.get('id'):
                         raise Exception("Could not extract video info.")
-                    url = info.get('url')
-                    if not url:
-                        raise Exception(f"No streaming URL found")
-                    return info, url
+                    path = get_audio_path(info['id'])
+                    if not path:
+                        raise Exception(f"Download finished but file not found")
+                    return info, path
             except Exception as fallback_exc:
                 logger.exception("yt-dlp fallback extraction failed query=%r refresh=%s: %s", query, refresh, fallback_exc)
                 future.set_exception(fallback_exc)
