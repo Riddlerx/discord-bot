@@ -32,6 +32,11 @@ YDL_OPTIONS_FAST = {
     'retries': 5,
     'fragment_retries': 5,
     'concurrent_fragment_downloads': 5,
+    # GCP Speed Optimizations
+    'nocheckcertificate': True,
+    'youtube_include_dash_manifest': False,
+    'youtube_include_hls_manifest': False,
+    'check_formats': 'cached',
     # Minimal extraction for speed
     'extract_flat': False,
     'skip_download': False,
@@ -45,7 +50,7 @@ YDL_OPTIONS_FAST = {
     'proxy': os.getenv("YTDLP_PROXY"),
     'extractor_args': {
         'youtube': {
-            'player_client': ['web'],
+            'player_client': ['android', 'web'], # Android is often faster than web
         }
     },
     'noprogress': True,
