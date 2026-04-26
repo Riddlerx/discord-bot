@@ -38,7 +38,6 @@ YDL_OPTIONS_FAST = {
     'youtube_include_hls_manifest': False,
     'check_formats': 'cached',
     # Minimal extraction for speed
-    'extract_flat': 'in_playlist',
     'skip_download': False,
     'writethumbnail': False,
     'writesubtitles': False,
