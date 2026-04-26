@@ -34,7 +34,7 @@ YDL_OPTIONS_FAST = {
     'concurrent_fragment_downloads': 5,
     # Minimal extraction for speed
     'extract_flat': False,
-    'skip_download': True,
+    'skip_download': False,
     'writethumbnail': False,
     'writesubtitles': False,
     'writeautomaticsub': False,
