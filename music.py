@@ -71,7 +71,7 @@ def _load_po_token() -> dict:
         with open(path) as f:
             data = json.load(f)
         # Check if token is too old, yt-dlp might reject it. 15 minutes is a safe bet.
-        age_minutes = (time.time() - data.get("ts", 0)) / 60 
+        age_minutes = (time.time() - data.get("ts", 0) / 1000) / 60
         if age_minutes > 15:
             logger.warning("po_token is %.0f minutes old", age_minutes)
         return data
@@ -133,7 +133,7 @@ def _build_ydl_options(base_options: dict) -> dict:
             }
         }
         # Calculate age in minutes more accurately with time.time() which is float seconds
-        age_minutes = (time.time() - tok.get("ts", 0)) / 60 
+        age_minutes = (time.time() - tok.get("ts", 0) / 1000) / 60
         logger.info("Using po_token (age: %.0f min)", age_minutes)
     else:
         # Fallback to default or existing extractor_args if no po_token
