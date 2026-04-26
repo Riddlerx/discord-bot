@@ -901,6 +901,7 @@ class Music(commands.Cog):
         self._remember_context(ctx)
         logger.info("Play command guild=%s user=%s query=%r", ctx.guild.id, ctx.author.id, query)
 
+        searching_msg = await ctx.send(f"\ud83d\udd0d Searching for `{query}`...")
         async with ctx.typing():
             try:
                 s_start = time.perf_counter()
@@ -921,9 +922,11 @@ class Music(commands.Cog):
                 info['original_url'] = query
                 info['_audio_path'] = audio_path
             except Exception as e:
+                await searching_msg.delete()
                 logger.exception("Error loading track guild=%s query=%r: %s", ctx.guild.id, query, e)
                 return await ctx.send(f"\u274c Could not load track: {e}")
 
+        await searching_msg.delete()
         if not voice_ok:
             return
 
