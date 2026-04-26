@@ -34,7 +34,7 @@ YDL_OPTIONS_FAST = {
     'concurrent_fragment_downloads': 5,
     # GCP Speed Optimizations
     'nocheckcertificate': True,
-    'youtube_include_dash_manifest': False,
+    'youtube_include_dash_manifest': True,
     'youtube_include_hls_manifest': False,
     'check_formats': 'cached',
     # Minimal extraction for speed
@@ -50,8 +50,7 @@ YDL_OPTIONS_FAST = {
     'proxy': os.getenv("YTDLP_PROXY"),
     'extractor_args': {
         'youtube': {
-            'player_client': ['ios'],
-            'skip': ['webpage', 'configs'],
+            'player_client': ['android', 'ios', 'web'],
         }
     },
     'lazy_playlist': True,
