@@ -11,7 +11,6 @@ import gc
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
-import json # Added import
 
 TEMP_DIR = os.path.join(tempfile.gettempdir(), 'discord_music')
 os.makedirs(TEMP_DIR, exist_ok=True)
@@ -49,7 +48,7 @@ YDL_OPTIONS_FAST = {
     'cookiefile': os.getenv("YTDLP_COOKIES") or os.getenv("YOUTUBE_COOKIES_PATH") or 'cookies.txt',
     'proxy': os.getenv("YTDLP_PROXY"),
     # extractor_args will be dynamically set by _build_ydl_options
-    'extractor_args': {}, 
+    'extractor_args': {"youtube": {"player_client": ["android", "web"]}}, 
     'lazy_playlist': True,
     'playlist_items': '1',
     'noplaylist': True,
@@ -63,25 +62,6 @@ YDL_OPTIONS_FALLBACK = {
     **YDL_OPTIONS_FAST,
     'format': 'bestaudio/best',
 }
-
-def _load_po_token() -> dict:
-    """Load po_token and visitorData from file if available."""
-    path = os.path.join(os.path.dirname(__file__), "potoken.json")
-    try:
-        with open(path) as f:
-            data = json.load(f)
-        # Check if token is too old, yt-dlp might reject it. 15 minutes is a safe bet.
-        age_minutes = (time.time() - data.get("ts", 0)) / 60 
-        if age_minutes > 15:
-            logger.warning("po_token is %.0f minutes old", age_minutes)
-        return data
-    except FileNotFoundError:
-        logger.warning("potoken.json not found, po_token authentication will not be used.")
-        return {}
-    except Exception as e:
-        logger.warning("Error loading po_token: %s", e)
-        return {}
-
 
 def _get_yt_dlp_auth_config() -> dict:
     """Return yt-dlp auth-related options from environment variables."""
@@ -119,29 +99,8 @@ def _build_ydl_options(base_options: dict) -> dict:
 
     if auth_cfg.get("cookiefile"):
         logger.info("Using yt-dlp cookies from %s", auth_cfg["cookiefile"])
-    elif base_options.get("cookiefile"): # This condition is less likely to be hit if YTDLP_COOKIES is set
+    elif base_options.get("cookiefile"):
         logger.info("Using default yt-dlp cookies from %s", base_options["cookiefile"])
-
-    # Dynamically set extractor_args based on po_token availability
-    tok = _load_po_token()
-    if tok.get("poToken") and tok.get("visitorData"):
-        options["extractor_args"] = {
-            "youtube": {
-                "player_client": ["web"], # Prefer web client for po_token
-                "po_token": [f"web+{tok['poToken']}"],
-                "visitor_data": [tok["visitorData"]],
-            }
-        }
-        # Calculate age in minutes more accurately with time.time() which is float seconds
-        age_minutes = (time.time() - tok.get("ts", 0)) / 60 
-        logger.info("Using po_token (age: %.0f min)", age_minutes)
-    else:
-        # Fallback to default or existing extractor_args if no po_token
-        # If base_options already had extractor_args, keep them, otherwise set default
-        options["extractor_args"] = options.get("extractor_args", {})
-        if not options["extractor_args"].get("youtube", {}).get("player_client"):
-             options["extractor_args"]["youtube"] = {"player_client": ["android", "web"]}
-        logger.debug("po_token not available or expired, using default extractor args.")
     
     return options
 
