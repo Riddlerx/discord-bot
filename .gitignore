@@ -3,3 +3,5 @@ __pycache__/
 .env
 bot_state.json
 cookies.txt
+node_modules/
+potoken.json
