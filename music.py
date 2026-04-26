@@ -21,7 +21,7 @@ AUTO_DISCONNECT_EMPTY_DELAY = int(os.getenv("AUTO_DISCONNECT_EMPTY_DELAY", "60")
 # ── yt-dlp options ─────────────────────────────────────────────────────────────
 
 YDL_OPTIONS_FAST = {
-    'format': 'bestaudio/best',
+    'format': 'bestaudio[ext=webm][vcodec=none]/bestaudio/best',
     'noplaylist': True,
     'default_search': 'ytsearch1',
     'quiet': True,
@@ -37,7 +37,7 @@ YDL_OPTIONS_FAST = {
     'proxy': os.getenv("YTDLP_PROXY"),
     'extractor_args': {
         'youtube': {
-            'player_client': ['android', 'web'],
+            'player_client': ['ios', 'android', 'web', 'tv'],
             'player_skip': ['webpage', 'configs'],
         }
     },
@@ -464,6 +464,8 @@ class Music(commands.Cog):
                 audio_path,
                 before_options=before_options,
                 options=f"-vn -loglevel warning -af {volume_filter}",
+                bitrate=128,
+                application='audio'
             )
         except Exception as exc:
             logger.warning("FFmpegOpusAudio failed for path=%s; falling back to PCMAudio: %s", audio_path, exc)
