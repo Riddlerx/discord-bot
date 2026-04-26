@@ -237,7 +237,7 @@ async def search_and_download(query: str, *, refresh: bool = False) -> tuple[dic
         def _do_search_and_download():
             opts = _build_ydl_options(YDL_OPTIONS_FAST)
             with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(query, download=False)  # Streaming mode
+                info = ydl.extract_info(query, download=True)  # Back to Download Mode for stability
 
             if info and 'entries' in info:
                 if not info['entries']:
@@ -247,12 +247,11 @@ async def search_and_download(query: str, *, refresh: bool = False) -> tuple[dic
             if not info or not info.get('id'):
                 raise Exception("Could not extract video info.")
 
-            # Get the streaming URL
-            url = info.get('url')
-            if not url:
-                 raise Exception(f"No streaming URL found for {info.get('id')}")
+            path = get_audio_path(info['id'])
+            if not path:
+                raise Exception(f"Download finished but file not found for {info.get('id')}")
 
-            return info, url
+            return info, path
 
         async with _extract_semaphore:
             info, path = await loop.run_in_executor(_ydl_executor, _do_search_and_download)
@@ -270,17 +269,17 @@ async def search_and_download(query: str, *, refresh: bool = False) -> tuple[dic
                 def _do_fallback():
                     opts = _build_ydl_options(YDL_OPTIONS_FALLBACK)
                     with yt_dlp.YoutubeDL(opts) as ydl:
-                        info = ydl.extract_info(query, download=False)
+                        info = ydl.extract_info(query, download=True)
                     if info and 'entries' in info:
                         if not info['entries']:
                             raise Exception("No results found.")
                         info = info['entries'][0]
                     if not info or not info.get('id'):
                         raise Exception("Could not extract video info.")
-                    url = info.get('url')
-                    if not url:
-                        raise Exception(f"No streaming URL found")
-                    return info, url
+                    path = get_audio_path(info['id'])
+                    if not path:
+                        raise Exception(f"Download finished but file not found")
+                    return info, path
             except Exception as fallback_exc:
                 logger.exception("yt-dlp fallback extraction failed query=%r refresh=%s: %s", query, refresh, fallback_exc)
                 future.set_exception(fallback_exc)
@@ -455,19 +454,8 @@ class Music(commands.Cog):
             return False
 
     def _create_audio_source(self, audio_path: str, volume: float, *, seek_seconds: int = 0):
-        # Optimized for streaming URLs with authentication headers
-        user_agent = os.getenv("USER_AGENT", 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36')
-        cookies_path = os.getenv("YTDLP_COOKIES") or os.getenv("YOUTUBE_COOKIES_PATH") or 'cookies.txt'
-        
-        # We pass headers and cookies to ffmpeg so the stream doesn't get a 403 Forbidden
-        before_options = (
-            f"-nostdin "
-            f"-headers 'User-Agent: {user_agent}\r\n' "
-            f"-cookies_file '{cookies_path}' "
-            f"-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 "
-            f"-thread_queue_size 8192"
-        )
-        
+        # Optimized for local files (more stable on AWS)
+        before_options = "-nostdin -thread_queue_size 8192"
         if seek_seconds > 0:
             before_options += f" -ss {seek_seconds}"
 
