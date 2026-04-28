@@ -438,26 +438,56 @@ class Music(commands.Cog):
             logger.exception("Voice connection failed guild=%s channel=%s: %s", guild.id, voice_channel, exc)
             return False
 
+def _parse_cookies_for_ffmpeg(cookiefile: str) -> str:
+    """Parse Netscape cookies file into a semicolon-separated string for FFmpeg."""
+    if not cookiefile or not os.path.exists(cookiefile):
+        return ""
+    
+    cookies = []
+    try:
+        with open(cookiefile, 'r') as f:
+            for line in f:
+                if not line.strip() or line.startswith('#'):
+                    continue
+                parts = line.split('\t')
+                if len(parts) >= 7:
+                    # name is at index 5, value at index 6
+                    cookies.append(f"{parts[5]}={parts[6].strip()}")
+        return "; ".join(cookies)
+    except Exception as e:
+        logger.warning("Failed to parse cookies for FFmpeg: %s", e)
+        return ""
+
+# ... (rest of the file content until _create_audio_source)
+
     def _create_audio_source(self, audio_path: str, volume: float, *, seek_seconds: int = 0):
         # Optimized for local files and streaming (more stable on AWS)
         is_url = audio_path.startswith("http")
         
         # Base FFmpeg options
-        # -reconnect flags are critical for stability when streaming from YouTube URLs
         before_options = "-nostdin -thread_queue_size 8192"
         if is_url:
             before_options += " -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
             
-            # Add cookies and user-agent to FFmpeg if we're streaming a URL
-            # This is CRITICAL to prevent 'burning' cookies or getting 403 Forbidden
+            # Use headers for cookies and user-agent (more reliable than -cookies)
             auth_cfg = _get_yt_dlp_auth_config()
             cookiefile = auth_cfg.get("cookiefile") or YDL_OPTIONS_FAST.get("cookiefile")
             user_agent = os.getenv("USER_AGENT") or YDL_OPTIONS_FAST.get("user_agent")
             
-            if cookiefile and os.path.exists(cookiefile):
-                before_options += f' -cookies "{cookiefile}"'
+            headers = []
             if user_agent:
-                before_options += f' -user_agent "{user_agent}"'
+                headers.append(f"User-Agent: {user_agent}")
+            
+            cookie_str = _parse_cookies_for_ffmpeg(cookiefile)
+            if cookie_str:
+                headers.append(f"Cookie: {cookie_str}")
+            
+            if headers:
+                # FFmpeg expects headers separated by \r\n and ending with \r\n
+                header_str = "\r\n".join(headers) + "\r\n"
+                # We must escape double quotes in the header string for the shell command
+                header_str = header_str.replace('"', '\\"')
+                before_options += f' -headers "{header_str}"'
 
         if seek_seconds > 0:
             before_options += f" -ss {seek_seconds}"
