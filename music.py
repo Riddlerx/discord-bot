@@ -462,7 +462,7 @@ class Music(commands.Cog):
             logger.exception("Voice connection failed guild=%s channel=%s: %s", guild.id, voice_channel, exc)
             return False
 
-    def _create_audio_source(self, audio_path: str, volume: float, *, seek_seconds: int = 0):
+    def _create_audio_source(self, audio_path: str, volume: float, *, info: dict | None = None, seek_seconds: int = 0):
         # Optimized for local files and streaming (more stable on AWS)
         is_url = audio_path.startswith("http")
         
@@ -475,18 +475,24 @@ class Music(commands.Cog):
                 "-reconnect_delay_max", "5"
             ])
             
-            # Use headers for cookies and user-agent
-            auth_cfg = _get_yt_dlp_auth_config()
-            cookiefile = auth_cfg.get("cookiefile") or YDL_OPTIONS_FAST.get("cookiefile")
-            user_agent = os.getenv("USER_AGENT") or YDL_OPTIONS_FAST.get("user_agent")
-            
             headers = []
-            if user_agent:
-                headers.append(f"User-Agent: {user_agent}")
             
-            cookie_str = _parse_cookies_for_ffmpeg(cookiefile)
-            if cookie_str:
-                headers.append(f"Cookie: {cookie_str}")
+            # If we have info from yt-dlp, it often contains the exact headers needed
+            if info and "http_headers" in info:
+                for key, value in info["http_headers"].items():
+                    headers.append(f"{key}: {value}")
+            else:
+                # Fallback to manual header construction
+                auth_cfg = _get_yt_dlp_auth_config()
+                cookiefile = auth_cfg.get("cookiefile") or YDL_OPTIONS_FAST.get("cookiefile")
+                user_agent = os.getenv("USER_AGENT") or YDL_OPTIONS_FAST.get("user_agent")
+                
+                if user_agent:
+                    headers.append(f"User-Agent: {user_agent}")
+                
+                cookie_str = _parse_cookies_for_ffmpeg(cookiefile)
+                if cookie_str:
+                    headers.append(f"Cookie: {cookie_str}")
             
             if headers:
                 # FFmpeg expects headers separated by \r\n and ending with \r\n
@@ -534,7 +540,7 @@ class Music(commands.Cog):
         if not vc or not vc.is_connected():
             raise RuntimeError("Voice client is not connected.")
 
-        source = self._create_audio_source(audio_path, st.volume, seek_seconds=seek_seconds)
+        source = self._create_audio_source(audio_path, st.volume, info=info, seek_seconds=seek_seconds)
         title = info.get("title", "Unknown")
 
         st.current_info = info
