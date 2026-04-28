@@ -813,18 +813,24 @@ class Music(commands.Cog):
         st.current_info = info
         title = info.get('title', 'Unknown')
 
-        # Use local file if available, otherwise get stream URL
+        # Use local file if available, otherwise download or get stream URL
         audio_path = info.get('_audio_path')
         if not audio_path or (not audio_path.startswith("http") and not os.path.exists(audio_path)):
             try:
                 query = info.get('original_url') or info.get('webpage_url') or info.get('title')
-                # Try fast extraction (no download) for immediate playback
-                info, audio_path = await search_and_download(query, download=False)
+                # Try download first for reliability
+                try:
+                    info, audio_path = await search_and_download(query, download=True)
+                except Exception as e:
+                    logger.warning("Download failed for track, falling back to stream: %s", e)
+                    # Fallback to streaming if download fails
+                    info, audio_path = await search_and_download(query, download=False)
+                
                 st.current_info = info
                 title = info.get('title', title)
             except Exception as e:
                 if text_channel:
-                    await text_channel.send(f"\u274c Could not extract stream for track: {e}")
+                    await text_channel.send(f"\u274c Could not load track: {e}")
                 st.is_loading = False
                 self._advance(guild.id)
                 return
@@ -967,11 +973,11 @@ class Music(commands.Cog):
                 logger.info("Voice prepare guild=%s took %.2fs", ctx.guild.id, time.perf_counter() - s_start)
 
                 s_dl = time.perf_counter()
-                # Fast start: Use streaming for the current request
-                info, audio_path = await search_and_download(query, download=False)
+                # Use download=True to ensure local file is available (prevents 403 Forbidden errors)
+                info, audio_path = await search_and_download(query, download=True)
                 elapsed = time.perf_counter() - s_dl
                 logger.info(
-                    "Search+extract guild=%s query=%r took %.2fs url=%s",
+                    "Search+download guild=%s query=%r took %.2fs path=%s",
                     ctx.guild.id,
                     query,
                     elapsed,
