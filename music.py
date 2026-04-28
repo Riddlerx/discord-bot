@@ -282,6 +282,29 @@ async def search_and_download(query: str, *, refresh: bool = False, download: bo
                 _inflight_queries.pop(inflight_key, None)
 
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _parse_cookies_for_ffmpeg(cookiefile: str) -> str:
+    """Parse Netscape cookies file into a semicolon-separated string for FFmpeg."""
+    if not cookiefile or not os.path.exists(cookiefile):
+        return ""
+    
+    cookies = []
+    try:
+        with open(cookiefile, 'r') as f:
+            for line in f:
+                if not line.strip() or line.startswith('#'):
+                    continue
+                parts = line.split('\t')
+                if len(parts) >= 7:
+                    # name is at index 5, value at index 6
+                    cookies.append(f"{parts[5]}={parts[6].strip()}")
+        return "; ".join(cookies)
+    except Exception as e:
+        logger.warning("Failed to parse cookies for FFmpeg: %s", e)
+        return ""
+
+
 # ── Per-guild state ────────────────────────────────────────────────────────────
 
 class GuildState:
@@ -437,28 +460,6 @@ class Music(commands.Cog):
         except Exception as exc:
             logger.exception("Voice connection failed guild=%s channel=%s: %s", guild.id, voice_channel, exc)
             return False
-
-def _parse_cookies_for_ffmpeg(cookiefile: str) -> str:
-    """Parse Netscape cookies file into a semicolon-separated string for FFmpeg."""
-    if not cookiefile or not os.path.exists(cookiefile):
-        return ""
-    
-    cookies = []
-    try:
-        with open(cookiefile, 'r') as f:
-            for line in f:
-                if not line.strip() or line.startswith('#'):
-                    continue
-                parts = line.split('\t')
-                if len(parts) >= 7:
-                    # name is at index 5, value at index 6
-                    cookies.append(f"{parts[5]}={parts[6].strip()}")
-        return "; ".join(cookies)
-    except Exception as e:
-        logger.warning("Failed to parse cookies for FFmpeg: %s", e)
-        return ""
-
-# ... (rest of the file content until _create_audio_source)
 
     def _create_audio_source(self, audio_path: str, volume: float, *, seek_seconds: int = 0):
         # Optimized for local files and streaming (more stable on AWS)
