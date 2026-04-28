@@ -3,6 +3,7 @@ from discord.ext import commands
 import yt_dlp
 import asyncio
 import os
+import shlex
 import random
 import tempfile
 import glob
@@ -465,12 +466,16 @@ class Music(commands.Cog):
         # Optimized for local files and streaming (more stable on AWS)
         is_url = audio_path.startswith("http")
         
-        # Base FFmpeg options
-        before_options = "-nostdin -thread_queue_size 8192"
+        # Base FFmpeg options as a list to avoid shell quoting issues
+        before_options = ["-nostdin", "-thread_queue_size", "8192"]
         if is_url:
-            before_options += " -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
+            before_options.extend([
+                "-reconnect", "1",
+                "-reconnect_streamed", "1",
+                "-reconnect_delay_max", "5"
+            ])
             
-            # Use headers for cookies and user-agent (more reliable than -cookies)
+            # Use headers for cookies and user-agent
             auth_cfg = _get_yt_dlp_auth_config()
             cookiefile = auth_cfg.get("cookiefile") or YDL_OPTIONS_FAST.get("cookiefile")
             user_agent = os.getenv("USER_AGENT") or YDL_OPTIONS_FAST.get("user_agent")
@@ -486,19 +491,21 @@ class Music(commands.Cog):
             if headers:
                 # FFmpeg expects headers separated by \r\n and ending with \r\n
                 header_str = "\r\n".join(headers) + "\r\n"
-                # We must escape double quotes in the header string for the shell command
-                header_str = header_str.replace('"', '\\"')
-                before_options += f' -headers "{header_str}"'
+                before_options.extend(["-headers", header_str])
 
         if seek_seconds > 0:
-            before_options += f" -ss {seek_seconds}"
+            before_options.extend(["-ss", str(seek_seconds)])
 
         volume_filter = f"volume={volume}"
+        ffmpeg_options = f"-vn -loglevel warning -af {volume_filter}"
+
+        logger.debug("Creating audio source path=%s before_options=%r", audio_path, before_options)
+
         try:
             return discord.FFmpegOpusAudio(
                 audio_path,
-                before_options=before_options,
-                options=f"-vn -loglevel warning -af {volume_filter}",
+                before_options=" ".join(shlex.quote(arg) for arg in before_options) if isinstance(before_options, str) else before_options,
+                options=ffmpeg_options,
                 bitrate=128
             )
         except Exception as exc:
@@ -507,7 +514,7 @@ class Music(commands.Cog):
                 discord.FFmpegPCMAudio(
                     audio_path,
                     before_options=before_options,
-                    options=f"-vn -loglevel warning -af {volume_filter}",
+                    options=ffmpeg_options,
                 ),
                 volume=volume,
             )
