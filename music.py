@@ -201,11 +201,10 @@ def cleanup_all():
 
 # ── Core: single-call search + download ───────────────────────────────────────
 
-async def search_and_download(query: str, *, refresh: bool = False) -> tuple[dict, str]:
-    """Search YouTube, extract info, and download audio in ONE yt-dlp call.
+async def search_and_download(query: str, *, refresh: bool = False, download: bool = True) -> tuple[dict, str]:
+    """Search YouTube, extract info, and optionally download audio.
 
-    Returns (info_dict, audio_filepath).
-    Uses caching and dedup to avoid redundant work.
+    Returns (info_dict, audio_path_or_url).
     """
     normalized = _normalize_query(query)
 
@@ -217,8 +216,8 @@ async def search_and_download(query: str, *, refresh: bool = False) -> tuple[dic
             if existing_path:
                 return cached, existing_path
 
-    # 2. Dedup in-flight requests for the same query
-    inflight_key = f"refresh:{normalized}" if refresh else (normalized or query)
+    # 2. Dedup in-flight requests
+    inflight_key = f"refresh:{normalized}:{download}" if refresh else f"{normalized or query}:{download}"
     future: asyncio.Future | None = None
     is_owner = False
     async with _inflight_queries_lock:
@@ -230,22 +229,21 @@ async def search_and_download(query: str, *, refresh: bool = False) -> tuple[dic
 
     if not is_owner:
         result = await asyncio.shield(future)
-        info = _clone_info(result[0])
-        return info, result[1]
+        return _clone_info(result[0]), result[1]
 
-    # 3. Single yt-dlp call: search + extract + download
+    # 3. yt-dlp call
     try:
         loop = asyncio.get_running_loop()
 
-        def _do_search_and_download():
+        def _do_extract():
             opts = _build_ydl_options(YDL_OPTIONS_FAST)
+            opts['skip_download'] = not download
             
-            # Optimization: If the query is already a URL, don't use the search engine
             if query.startswith(('http://', 'https://')):
                 opts['default_search'] = 'auto'
             
             with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(query, download=True)
+                info = ydl.extract_info(query, download=download)
 
             if info and 'entries' in info:
                 if not info['entries']:
@@ -255,53 +253,32 @@ async def search_and_download(query: str, *, refresh: bool = False) -> tuple[dic
             if not info or not info.get('id'):
                 raise Exception("Could not extract video info.")
 
-            path = get_audio_path(info['id'])
-            if not path:
-                raise Exception(f"Download finished but file not found for {info.get('id')}")
-
-            return info, path
+            # If we downloaded it, return the path. Otherwise, return the stream URL.
+            if download:
+                path = get_audio_path(info['id'])
+                if not path:
+                    raise Exception(f"Download finished but file not found for {info.get('id')}")
+                return info, path
+            
+            return info, info['url']
 
         async with _extract_semaphore:
-            info, path = await loop.run_in_executor(_ydl_executor, _do_search_and_download)
+            info, result_path = await loop.run_in_executor(_ydl_executor, _do_extract)
 
-        await _store_cached_info(info, query)
-        future.set_result((_clone_info(info), path))
-        return info, path
+        if download:
+            await _store_cached_info(info, query)
+        
+        future.set_result((_clone_info(info), result_path))
+        return info, result_path
 
     except Exception as exc:
-        # On failure, retry once with fallback options
-        error_text = str(exc).lower()
-        logger.warning("yt-dlp primary extraction failed query=%r refresh=%s: %s", query, refresh, exc)
-        if "requested format" in error_text:
-            try:
-                def _do_fallback():
-                    opts = _build_ydl_options(YDL_OPTIONS_FALLBACK)
-                    with yt_dlp.YoutubeDL(opts) as ydl:
-                        info = ydl.extract_info(query, download=True)
-                    if info and 'entries' in info:
-                        if not info['entries']:
-                            raise Exception("No results found.")
-                        info = info['entries'][0]
-                    if not info or not info.get('id'):
-                        raise Exception("Could not extract video info.")
-                    path = get_audio_path(info['id'])
-                    if not path:
-                        raise Exception(f"Download finished but file not found")
-                    return info, path
-            except Exception as fallback_exc:
-                logger.exception("yt-dlp fallback extraction failed query=%r refresh=%s: %s", query, refresh, fallback_exc)
-                future.set_exception(fallback_exc)
-                future.exception()
-                raise fallback_exc
-
-        logger.exception("yt-dlp extraction failed query=%r refresh=%s: %s", query, refresh, exc)
+        logger.warning("yt-dlp extraction failed query=%r refresh=%s download=%s: %s", query, refresh, download, exc)
         future.set_exception(exc)
         future.exception()
         raise
     finally:
         async with _inflight_queries_lock:
-            current = _inflight_queries.get(inflight_key)
-            if current is future:
+            if _inflight_queries.get(inflight_key) is future:
                 _inflight_queries.pop(inflight_key, None)
 
 
@@ -462,8 +439,26 @@ class Music(commands.Cog):
             return False
 
     def _create_audio_source(self, audio_path: str, volume: float, *, seek_seconds: int = 0):
-        # Optimized for local files (more stable on AWS)
+        # Optimized for local files and streaming (more stable on AWS)
+        is_url = audio_path.startswith("http")
+        
+        # Base FFmpeg options
+        # -reconnect flags are critical for stability when streaming from YouTube URLs
         before_options = "-nostdin -thread_queue_size 8192"
+        if is_url:
+            before_options += " -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
+            
+            # Add cookies and user-agent to FFmpeg if we're streaming a URL
+            # This is CRITICAL to prevent 'burning' cookies or getting 403 Forbidden
+            auth_cfg = _get_yt_dlp_auth_config()
+            cookiefile = auth_cfg.get("cookiefile") or YDL_OPTIONS_FAST.get("cookiefile")
+            user_agent = os.getenv("USER_AGENT") or YDL_OPTIONS_FAST.get("user_agent")
+            
+            if cookiefile and os.path.exists(cookiefile):
+                before_options += f' -cookies "{cookiefile}"'
+            if user_agent:
+                before_options += f' -user_agent "{user_agent}"'
+
         if seek_seconds > 0:
             before_options += f" -ss {seek_seconds}"
 
@@ -753,7 +748,7 @@ class Music(commands.Cog):
         ensure_voice: bool = True,
         status_message: str | None = None,
     ):
-        """Start playing a track from a downloaded file."""
+        """Start playing a track. Uses cached file or fast stream URL."""
         st = self.state(guild.id)
 
         if ensure_voice:
@@ -771,16 +766,18 @@ class Music(commands.Cog):
         st.current_info = info
         title = info.get('title', 'Unknown')
 
+        # Use local file if available, otherwise get stream URL
         audio_path = info.get('_audio_path')
-        if not audio_path or not os.path.exists(audio_path):
+        if not audio_path or (not audio_path.startswith("http") and not os.path.exists(audio_path)):
             try:
                 query = info.get('original_url') or info.get('webpage_url') or info.get('title')
-                info, audio_path = await search_and_download(query, refresh=True)
+                # Try fast extraction (no download) for immediate playback
+                info, audio_path = await search_and_download(query, download=False)
                 st.current_info = info
                 title = info.get('title', title)
             except Exception as e:
                 if text_channel:
-                    await text_channel.send(f"\u274c Could not download track: {e}")
+                    await text_channel.send(f"\u274c Could not extract stream for track: {e}")
                 st.is_loading = False
                 self._advance(guild.id)
                 return
@@ -923,10 +920,11 @@ class Music(commands.Cog):
                 logger.info("Voice prepare guild=%s took %.2fs", ctx.guild.id, time.perf_counter() - s_start)
 
                 s_dl = time.perf_counter()
-                info, audio_path = await search_and_download(query)
+                # Fast start: Use streaming for the current request
+                info, audio_path = await search_and_download(query, download=False)
                 elapsed = time.perf_counter() - s_dl
                 logger.info(
-                    "Search+download guild=%s query=%r took %.2fs path=%s",
+                    "Search+extract guild=%s query=%r took %.2fs url=%s",
                     ctx.guild.id,
                     query,
                     elapsed,
