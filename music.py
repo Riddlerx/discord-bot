@@ -49,7 +49,7 @@ YDL_OPTIONS_FAST = {
     'cookiefile': os.getenv("YTDLP_COOKIES") or os.getenv("YOUTUBE_COOKIES_PATH") or 'cookies.txt',
     'proxy': os.getenv("YTDLP_PROXY"),
     # extractor_args will be dynamically set by _build_ydl_options
-    'extractor_args': {"youtube": {"player_client": ["android", "web"]}}, 
+    'extractor_args': {"youtube": {"player_client": ["ios", "android", "mweb"]}}, 
     'lazy_playlist': True,
     'playlist_items': '1',
     'noplaylist': True,
