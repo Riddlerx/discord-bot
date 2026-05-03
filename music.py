@@ -29,22 +29,27 @@ async def _extract_spotify_metadata(url: str) -> list[str] | str | None:
     Returns a list of queries if it's a playlist/album, or a single query string for a track.
     """
     try:
-        # Convert to embed URL for better scraping (less JS dependency)
+        # Handle spotify.link (mobile redirects)
+        if "spotify.link" in url:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, allow_redirects=True, timeout=10) as resp:
+                    url = str(resp.url)
+                    logger.info("Redirected spotify.link to: %s", url)
+
+        # Convert to embed URL for better scraping
         embed_url = url
         if "/embed/" not in url:
-            if "/track/" in url:
-                embed_url = url.replace("open.spotify.com/track/", "open.spotify.com/embed/track/")
-            elif "/playlist/" in url:
-                embed_url = url.replace("open.spotify.com/playlist/", "open.spotify.com/embed/playlist/")
-            elif "/album/" in url:
-                embed_url = url.replace("open.spotify.com/album/", "open.spotify.com/embed/album/")
+            embed_url = url.replace("open.spotify.com/track/", "open.spotify.com/embed/track/")
+            embed_url = embed_url.replace("open.spotify.com/playlist/", "open.spotify.com/embed/playlist/")
+            embed_url = embed_url.replace("open.spotify.com/album/", "open.spotify.com/embed/album/")
         
         # Remove query params for a cleaner URL
         if "?" in embed_url:
             embed_url = embed_url.split("?")[0]
 
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
         }
         async with aiohttp.ClientSession(headers=headers) as session:
             async with session.get(embed_url, timeout=10) as response:
@@ -53,93 +58,56 @@ async def _extract_spotify_metadata(url: str) -> list[str] | str | None:
                     return None
                 html = await response.text()
                 
-                # Check if it's a playlist or album
                 is_collection = "/playlist/" in embed_url or "/album/" in embed_url
-                
-                # 1. Try JSON-like track data (works for both tracks and collections)
                 tracks = []
                 
-                # Pattern A: "title":"Song Name","subtitle":"Artist Name" (Common in playlists/albums)
-                track_matches_a = re.findall(r'\"title\":\"([^"]+)\",\"subtitle\":\"([^"]+)\"', html)
-                for t_name, a_name in track_matches_a:
-                    t = html_lib.unescape(t_name).strip()
-                    a = html_lib.unescape(a_name).strip()
-                    # Skip the playlist's own title if it's the only match or first match
-                    if t.lower() in ("spotify", "playlist", "album"):
-                        continue
-                    query = f"{t} {a}"
-                    if query not in tracks:
-                        tracks.append(query)
-                
-                # Pattern B: "title":"Song Name","artists":[{"name":"Artist Name"}] (Common in single tracks)
-                if not tracks:
-                    track_matches_b = re.findall(r'\"title\":\"([^"]+)\",\"artists\":\[\{\"name\":\"([^"]+)\"', html)
-                    for t_name, a_name in track_matches_b:
-                        t = html_lib.unescape(t_name).strip()
-                        a = html_lib.unescape(a_name).strip()
-                        if t.lower() in ("spotify", "playlist", "album"):
-                            continue
-                        query = f"{t} {a}"
-                        if query not in tracks:
-                            tracks.append(query)
+                # Pattern 1: JSON-LD like structure (Most reliable)
+                # "title":"Track Name","artists":[{"name":"Artist Name"}]
+                # We use a permissive regex to handle whitespace/formatting variations
+                t_matches = re.findall(r'\"title\":\"([^\"]+)\".*?\"artists\":\[\{.*?\"name\":\"([^\"]+)\"', html)
+                for t_name, a_name in t_matches:
+                    t, a = html_lib.unescape(t_name).strip(), html_lib.unescape(a_name).strip()
+                    if t.lower() not in ("spotify", "playlist", "album"):
+                        tracks.append(f"{t} {a}")
 
-                # Pattern C: "name":"Song Name","artists":[{"name":"Artist Name"}] (Backup)
+                # Pattern 2: title/subtitle (Common in playlists)
                 if not tracks:
-                    track_matches_c = re.findall(r'\"name\":\"([^"]+)\",\"artists\":\[\{\"name\":\"([^"]+)\"', html)
-                    for t_name, a_name in track_matches_c:
-                        t = html_lib.unescape(t_name).strip()
-                        a = html_lib.unescape(a_name).strip()
-                        if t.lower() in ("spotify", "playlist", "album"):
-                            continue
-                        query = f"{t} {a}"
-                        if query not in tracks:
-                            tracks.append(query)
-                
-                # 2. Try HTML tags (backup)
+                    ts_matches = re.findall(r'\"title\":\"([^\"]+)\",\"subtitle\":\"([^\"]+)\"', html)
+                    for t_name, s_name in ts_matches:
+                        t, s = html_lib.unescape(t_name).strip(), html_lib.unescape(s_name).strip()
+                        if t.lower() not in ("spotify", "playlist", "album"):
+                            tracks.append(f"{t} {s}")
+
+                # Pattern 3: name/artists array (Backup)
                 if not tracks:
-                    titles = re.findall(r'<h3[^>]*>([^<]+)</h3>', html)
-                    artists_raw = re.findall(r'<h4[^>]*>(?:<span[^>]*>.*?</span>\s*)?([^<]+)</h4>', html)
-                    for title, artist in zip(titles, artists_raw):
-                        t = html_lib.unescape(title).strip()
-                        a = html_lib.unescape(artist).strip()
-                        if t and a:
-                            query = f"{t} {a}"
-                            if query not in tracks:
-                                tracks.append(query)
+                    na_matches = re.findall(r'\"name\":\"([^\"]+)\",\"artists\":\[\{.*?\"name\":\"([^\"]+)\"', html)
+                    for t_name, a_name in na_matches:
+                        t, a = html_lib.unescape(t_name).strip(), html_lib.unescape(a_name).strip()
+                        if t.lower() not in ("spotify", "playlist", "album"):
+                            tracks.append(f"{t} {a}")
 
                 if tracks:
                     if is_collection:
                         logger.info("Extracted %d tracks from Spotify collection: %s", len(tracks), url)
                         return tracks
-                    else:
-                        # For single tracks, the first match is the track itself
-                        return tracks[0]
+                    return tracks[0]
                 
-                # 3. Fallback to Open Graph metadata
-                title = None
-                title_match = re.search(r'<meta\s+property="og:title"\s+content="([^"]+)"', html)
-                if not title_match:
-                    title_match = re.search(r'<title>([^<]+)</title>', html)
-                
-                if title_match:
-                    title = html_lib.unescape(title_match.group(1).replace(" | Spotify", "").strip())
-                
-                artist = None
-                desc_match = re.search(r'<meta\s+property="og:description"\s+content="([^"]+)"', html)
-                if desc_match:
-                    desc = html_lib.unescape(desc_match.group(1))
-                    if " · " in desc:
-                        artist = desc.split(" · ")[0]
-                
-                if title and artist:
-                    if title.lower() in ("spotify", "playlist", "album"):
-                        return artist
-                    return f"{title} {artist}"
-                
-                if title and title.lower() in ("spotify", "playlist", "album"):
-                    return None
-                    
-                return title
+                # Final Fallback: Open Graph Metadata
+                og_title = re.search(r'property="og:title"\s+content="([^"]+)"', html)
+                if og_title:
+                    title = html_lib.unescape(og_title.group(1).replace(" | Spotify", "").strip())
+                    if title.lower() not in ("spotify", "playlist", "album"):
+                        og_desc = re.search(r'property="og:description"\s+content="([^"]+)"', html)
+                        if og_desc:
+                            desc = html_lib.unescape(og_desc.group(1))
+                            artist = desc.split(" · ")[0] if " · " in desc else ""
+                            return f"{title} {artist}".strip()
+                        return title
+
+                # If all failed, log a snippet for debugging
+                snippet = html[:500].replace("\n", " ")
+                logger.warning("Spotify extraction failed for %s. Snippet: %s", embed_url, snippet)
+                return None
     except Exception as e:
         logger.warning("Failed to extract Spotify metadata from %s: %s", url, e)
         return None
