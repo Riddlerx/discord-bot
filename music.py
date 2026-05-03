@@ -12,6 +12,7 @@ import gc
 import logging
 import re
 import aiohttp
+import html as html_lib
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
 
@@ -59,14 +60,13 @@ async def _extract_spotify_metadata(url: str) -> list[str] | str | None:
                     # Look for track names in h3 and artists in h4 in the embed page
                     tracks = []
                     # Find all h3 (titles) and h4 (artists)
-                    # Pattern for titles: <h3 ...>Title</h3>
                     titles = re.findall(r'<h3[^>]*>([^<]+)</h3>', html)
-                    # Pattern for artists: <h4 ...>(?:<span>E</span>)?Artist</h4>
-                    # We need to handle the optional Explicit span
-                    artists_raw = re.findall(r'<h4[^>]*>(?:<span[^>]*>[^<]*</span>)?([^<]+)</h4>', html)
+                    # More robust artist regex to handle various tag combinations
+                    artists_raw = re.findall(r'<h4[^>]*>(?:<span[^>]*>.*?</span>\s*)?([^<]+)</h4>', html)
+                    
+                    logger.debug("Spotify scraping: found %d titles and %d artists", len(titles), len(artists_raw))
                     
                     # Clean up entities like &amp;
-                    import html as html_lib
                     for title, artist in zip(titles, artists_raw):
                         t = html_lib.unescape(title).strip()
                         a = html_lib.unescape(artist).strip()
@@ -75,9 +75,19 @@ async def _extract_spotify_metadata(url: str) -> list[str] | str | None:
                             if query not in tracks:
                                 tracks.append(query)
                     
+                    if not tracks:
+                        # Try searching for JSON-like track data if HTML tags failed
+                        track_matches = re.findall(r'\"name\":\"([^"]+)\",\"artists\":\[\{\"name\":\"([^"]+)\"', html)
+                        for t_name, a_name in track_matches:
+                            query = f"{html_lib.unescape(t_name)} {html_lib.unescape(a_name)}"
+                            if query not in tracks:
+                                tracks.append(query)
+
                     if tracks:
                         logger.info("Extracted %d tracks from Spotify collection: %s", len(tracks), url)
                         return tracks
+                    else:
+                        logger.warning("Spotify collection detected but no tracks found in HTML: %s", embed_url)
                 
                 # Fallback to metadata in the HTML for single tracks or if embed scraping failed
                 # Try og:title (usually "Song Name")
@@ -87,27 +97,23 @@ async def _extract_spotify_metadata(url: str) -> list[str] | str | None:
                     title_match = re.search(r'<title>([^<]+)</title>', html)
                 
                 if title_match:
-                    title = title_match.group(1).replace(" | Spotify", "").strip()
-                    import html as html_lib
-                    title = html_lib.unescape(title)
+                    title = html_lib.unescape(title_match.group(1).replace(" | Spotify", "").strip())
                 
                 artist = None
                 desc_match = re.search(r'<meta\s+property="og:description"\s+content="([^"]+)"', html)
                 if desc_match:
-                    desc = desc_match.group(1)
-                    import html as html_lib
-                    desc = html_lib.unescape(desc)
+                    desc = html_lib.unescape(desc_match.group(1))
                     if " · " in desc:
                         artist = desc.split(" · ")[0]
                 
                 if title and artist:
                     # Avoid generic titles
-                    if title.lower() == "spotify":
+                    if title.lower() in ("spotify", "playlist", "album"):
                         return artist
                     return f"{title} {artist}"
                 
                 # Final safeguard: if title is just "Spotify", return None to signal failure
-                if title and title.lower() == "spotify":
+                if title and title.lower() in ("spotify", "playlist", "album"):
                     return None
                     
                 return title
