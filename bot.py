@@ -102,9 +102,29 @@ bot = commands.Bot(
     intents=intents,
     member_cache_flags=discord.MemberCacheFlags.none(),
     chunk_guilds_at_startup=False,
-    gateway_queue_amount=1,  # Keep gateway queue lean
-    heartbeat_timeout=120.0, # Give more room for missed heartbeats
+    gateway_queue_amount=1,
+    heartbeat_timeout=120.0,
+    case_insensitive=True,
+    help_command=None
 )
+
+@bot.command(name="help")
+async def help_command(ctx):
+    """Display the list of available commands."""
+    msg = (
+        "**Commands List**\n\n"
+        "🎵 **Music**\n"
+        "`!play [url/search]` - Play a song\n"
+        "`!loop` - Repeat current track\n"
+        "`!skip` - Vote to skip\n\n"
+        "🧹 **Management**\n"
+        "`!clear` - Empty the queue\n"
+        "`!stop` - Stop & disconnect\n\n"
+        "💰 **Economy**\n"
+        "`!price [item]` - Check WoW item prices\n"
+        "`!guildvault` - Show the weekly vault leaderboard"
+    )
+    await ctx.send(msg)
 auto_update_task: Optional[asyncio.Task] = None
 
 
@@ -598,6 +618,9 @@ async def on_ready():
 
     startup_elapsed = time.perf_counter() - STARTUP_MONOTONIC
     logger.info("Bot connected as %s in %.2fs", bot.user, startup_elapsed)
+
+    # Set the bot's status
+    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="!help for commands"))
 
     if auto_update_task is None or auto_update_task.done():
         auto_update_task = bot.loop.create_task(auto_update())
