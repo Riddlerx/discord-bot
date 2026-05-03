@@ -114,15 +114,15 @@ async def help_command(ctx):
     msg = (
         "**Commands List**\n\n"
         "🎵 **Music**\n"
-        "`!play [url/search]` - Play a song\n"
+        "`!play url/search` - Play a song\n"
         "`!loop` - Repeat current track\n"
         "`!skip` - Vote to skip\n\n"
         "🧹 **Management**\n"
         "`!clear` - Empty the queue\n"
+        "'!roll' to check luck\n"
         "`!stop` - Stop & disconnect\n\n"
         "💰 **Economy**\n"
-        "`!price [item]` - Check WoW item prices\n"
-        "`!guildvault` - Show the weekly vault leaderboard"
+        "`!price item` - Check WoW item prices"
     )
     await ctx.send(msg)
 auto_update_task: Optional[asyncio.Task] = None
