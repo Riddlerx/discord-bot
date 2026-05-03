@@ -28,35 +28,59 @@ async def _extract_spotify_metadata(url: str) -> list[str] | str | None:
     Returns a list of queries if it's a playlist/album, or a single query string for a track.
     """
     try:
+        # Convert to embed URL for better scraping (less JS dependency)
+        embed_url = url
+        if "/embed/" not in url:
+            if "/track/" in url:
+                embed_url = url.replace("open.spotify.com/track/", "open.spotify.com/embed/track/")
+            elif "/playlist/" in url:
+                embed_url = url.replace("open.spotify.com/playlist/", "open.spotify.com/embed/playlist/")
+            elif "/album/" in url:
+                embed_url = url.replace("open.spotify.com/album/", "open.spotify.com/embed/album/")
+        
+        # Remove query params for a cleaner URL
+        if "?" in embed_url:
+            embed_url = embed_url.split("?")[0]
+
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         }
         async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get(url, timeout=10) as response:
+            async with session.get(embed_url, timeout=10) as response:
                 if response.status != 200:
-                    logger.warning("Spotify metadata request failed with status %d", response.status)
+                    logger.warning("Spotify metadata request failed with status %d for %s", response.status, embed_url)
                     return None
                 html = await response.text()
                 
                 # Check if it's a playlist or album
-                is_collection = "/playlist/" in url or "/album/" in url
+                is_collection = "/playlist/" in embed_url or "/album/" in embed_url
                 
                 if is_collection:
-                    # Spotify Embed or Web Player often has track names in the HTML for SEO
-                    # This is a bit brittle but avoids needing an API key for basic usage
+                    # Look for track names in h3 and artists in h4 in the embed page
                     tracks = []
-                    # Pattern for track names in various Spotify metadata structures
-                    track_matches = re.findall(r'\"name\":\"([^"]+)\",\"artists\":\[\{\"name\":\"([^"]+)\"', html)
-                    for track_name, artist_name in track_matches:
-                        query = f"{track_name} {artist_name}"
-                        if query not in tracks:
-                            tracks.append(query)
+                    # Find all h3 (titles) and h4 (artists)
+                    # Pattern for titles: <h3 ...>Title</h3>
+                    titles = re.findall(r'<h3[^>]*>([^<]+)</h3>', html)
+                    # Pattern for artists: <h4 ...>(?:<span>E</span>)?Artist</h4>
+                    # We need to handle the optional Explicit span
+                    artists_raw = re.findall(r'<h4[^>]*>(?:<span[^>]*>[^<]*</span>)?([^<]+)</h4>', html)
+                    
+                    # Clean up entities like &amp;
+                    import html as html_lib
+                    for title, artist in zip(titles, artists_raw):
+                        t = html_lib.unescape(title).strip()
+                        a = html_lib.unescape(artist).strip()
+                        if t and a:
+                            query = f"{t} {a}"
+                            if query not in tracks:
+                                tracks.append(query)
                     
                     if tracks:
                         logger.info("Extracted %d tracks from Spotify collection: %s", len(tracks), url)
                         return tracks
                 
-                # Fallback to single track extraction (existing logic)
+                # Fallback to metadata in the HTML for single tracks or if embed scraping failed
+                # Try og:title (usually "Song Name")
                 title = None
                 title_match = re.search(r'<meta\s+property="og:title"\s+content="([^"]+)"', html)
                 if not title_match:
@@ -64,18 +88,28 @@ async def _extract_spotify_metadata(url: str) -> list[str] | str | None:
                 
                 if title_match:
                     title = title_match.group(1).replace(" | Spotify", "").strip()
+                    import html as html_lib
+                    title = html_lib.unescape(title)
                 
                 artist = None
                 desc_match = re.search(r'<meta\s+property="og:description"\s+content="([^"]+)"', html)
                 if desc_match:
                     desc = desc_match.group(1)
+                    import html as html_lib
+                    desc = html_lib.unescape(desc)
                     if " · " in desc:
                         artist = desc.split(" · ")[0]
                 
                 if title and artist:
-                    if "Spotify" in title and artist:
-                         return artist
+                    # Avoid generic titles
+                    if title.lower() == "spotify":
+                        return artist
                     return f"{title} {artist}"
+                
+                # Final safeguard: if title is just "Spotify", return None to signal failure
+                if title and title.lower() == "spotify":
+                    return None
+                    
                 return title
     except Exception as e:
         logger.warning("Failed to extract Spotify metadata from %s: %s", url, e)
