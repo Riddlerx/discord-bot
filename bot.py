@@ -119,7 +119,7 @@ async def help_command(ctx):
         "`!skip` - Vote to skip\n\n"
         "🧹 **Management**\n"
         "`!clear` - Empty the queue\n"
-        "'!roll' to check luck\n"
+        "`!roll` to check luck\n"
         "`!stop` - Stop & disconnect\n\n"
         "💰 **Economy**\n"
         "`!price item` - Check WoW item prices"

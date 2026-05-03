@@ -314,6 +314,10 @@ async def search_and_download(query: str, *, refresh: bool = False, download: bo
             query = metadata
         else:
             raise Exception("Could not extract song info from this Spotify link. Please try searching for the song name instead.")
+        
+        # Refinement: Append 'audio' to prioritize studio versions over music videos
+        if not query.lower().endswith("audio") and not query.lower().endswith("lyrics"):
+            query = f"{query} audio"
 
     normalized = _normalize_query(query)
 
