@@ -57,13 +57,43 @@ async def _extract_spotify_metadata(url: str) -> list[str] | str | None:
                 is_collection = "/playlist/" in embed_url or "/album/" in embed_url
                 
                 # 1. Try JSON-like track data (works for both tracks and collections)
-                # Pattern: "name":"Song Name","artists":[{"name":"Artist Name"}]
                 tracks = []
-                track_matches = re.findall(r'\"name\":\"([^"]+)\",\"artists\":\[\{\"name\":\"([^"]+)\"', html)
-                for t_name, a_name in track_matches:
-                    query = f"{html_lib.unescape(t_name)} {html_lib.unescape(a_name)}"
+                
+                # Pattern A: "title":"Song Name","subtitle":"Artist Name" (Common in playlists/albums)
+                track_matches_a = re.findall(r'\"title\":\"([^"]+)\",\"subtitle\":\"([^"]+)\"', html)
+                for t_name, a_name in track_matches_a:
+                    t = html_lib.unescape(t_name).strip()
+                    a = html_lib.unescape(a_name).strip()
+                    # Skip the playlist's own title if it's the only match or first match
+                    if t.lower() in ("spotify", "playlist", "album"):
+                        continue
+                    query = f"{t} {a}"
                     if query not in tracks:
                         tracks.append(query)
+                
+                # Pattern B: "title":"Song Name","artists":[{"name":"Artist Name"}] (Common in single tracks)
+                if not tracks:
+                    track_matches_b = re.findall(r'\"title\":\"([^"]+)\",\"artists\":\[\{\"name\":\"([^"]+)\"', html)
+                    for t_name, a_name in track_matches_b:
+                        t = html_lib.unescape(t_name).strip()
+                        a = html_lib.unescape(a_name).strip()
+                        if t.lower() in ("spotify", "playlist", "album"):
+                            continue
+                        query = f"{t} {a}"
+                        if query not in tracks:
+                            tracks.append(query)
+
+                # Pattern C: "name":"Song Name","artists":[{"name":"Artist Name"}] (Backup)
+                if not tracks:
+                    track_matches_c = re.findall(r'\"name\":\"([^"]+)\",\"artists\":\[\{\"name\":\"([^"]+)\"', html)
+                    for t_name, a_name in track_matches_c:
+                        t = html_lib.unescape(t_name).strip()
+                        a = html_lib.unescape(a_name).strip()
+                        if t.lower() in ("spotify", "playlist", "album"):
+                            continue
+                        query = f"{t} {a}"
+                        if query not in tracks:
+                            tracks.append(query)
                 
                 # 2. Try HTML tags (backup)
                 if not tracks:
