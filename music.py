@@ -298,36 +298,22 @@ def cleanup_all():
 
 # ── Core: single-call search + download ───────────────────────────────────────
 
-async def search_and_download(query: str, *, refresh: bool = False, download: bool = True) -> tuple[dict, str] | list[tuple[dict, str]]:
+async def search_and_download(query: str, *, refresh: bool = False, download: bool = True) -> tuple[dict, str]:
     """Search YouTube, extract info, and optionally download audio.
 
-    Returns (info_dict, audio_path_or_url) or a list of them if multiple tracks were found (e.g. Spotify playlist).
+    Returns (info_dict, audio_path_or_url).
     """
     # 0. Handle Spotify URLs by converting them to YouTube search queries
+    # Note: Collections (playlists/albums) should be handled by the caller (e.g. play command)
+    # to avoid blocking on multiple downloads.
     original_query = query
     is_spotify = "open.spotify.com" in query
     if is_spotify:
         metadata = await _extract_spotify_metadata(query)
         if isinstance(metadata, list):
-            logger.info("Spotify playlist/album detected with %d tracks", len(metadata))
-            # For playlists, we process each track. To keep it simple and responsive,
-            # we'll return a list of queries to be handled by the caller.
-            # However, search_and_download usually returns (info, path).
-            # We'll adapt it to return a list of results.
-            results = []
-            # Only process first 50 tracks to avoid hanging
-            for track_query in metadata[:50]:
-                try:
-                    # Recursive call for each track (as a simple search query)
-                    res = await search_and_download(track_query, refresh=refresh, download=download)
-                    if isinstance(res, tuple):
-                        results.append(res)
-                except Exception as e:
-                    logger.warning("Failed to process Spotify playlist track %r: %s", track_query, e)
-            return results
-        
-        if metadata:
-            logger.info("Converted Spotify URL to search query: %s -> %s", query, metadata)
+            # If a list is returned, just take the first one for this single-item call
+            query = metadata[0] if metadata else query
+        elif metadata:
             query = metadata
         else:
             logger.warning("Could not extract metadata from Spotify URL, attempting direct extraction: %s", query)
@@ -1107,34 +1093,37 @@ class Music(commands.Cog):
                 voice_ok = await self._ensure_voice(ctx)
                 logger.info("Voice prepare guild=%s took %.2fs", ctx.guild.id, time.perf_counter() - s_start)
 
-                s_dl = time.perf_counter()
-                # Use download=True to ensure local file is available
-                results = await search_and_download(query, download=True)
-                elapsed = time.perf_counter() - s_dl
-                logger.info("Search+download guild=%s took %.2fs", ctx.guild.id, elapsed)
-
-                if not isinstance(results, list):
-                    results = [results]
+                # Check if it's a Spotify playlist/album for lazy loading
+                playlist_tracks = None
+                if "open.spotify.com" in query and ("/playlist/" in query or "/album/" in query):
+                    playlist_tracks = await _extract_spotify_metadata(query)
                 
-                if not results:
-                    raise Exception("No results found.")
-
-                # Process all results
-                first_info = None
-                added_count = 0
-                for info, audio_path in results:
-                    info['original_url'] = query
+                if isinstance(playlist_tracks, list) and playlist_tracks:
+                    logger.info("Spotify playlist detected with %d tracks, loading first one.", len(playlist_tracks))
+                    # Resolve first track immediately
+                    info, audio_path = await search_and_download(playlist_tracks[0], download=True)
+                    info['original_url'] = playlist_tracks[0]
                     info['_audio_path'] = audio_path
                     
-                    if not first_info:
-                        first_info = info
+                    # Add remaining tracks as placeholders (will be resolved when played)
+                    for track_query in playlist_tracks[1:50]:
+                        st.queue.append({
+                            'title': track_query,
+                            'original_url': track_query,
+                        })
                     
-                    if added_count > 0:
-                         st.queue.append(info)
-                    added_count += 1
-                
-                info = first_info # For the initial play logic
-                
+                    added_msg = f"\U0001f4cb Added **{len(playlist_tracks[:50])}** tracks from Spotify."
+                else:
+                    # Single track or normal search
+                    s_dl = time.perf_counter()
+                    info, audio_path = await search_and_download(query, download=True)
+                    elapsed = time.perf_counter() - s_dl
+                    logger.info("Search+download guild=%s took %.2fs", ctx.guild.id, elapsed)
+                    
+                    info['original_url'] = query
+                    info['_audio_path'] = audio_path
+                    added_msg = f"\U0001f4cb Added to queue: **{info.get('title')}**"
+
             except Exception as e:
                 if 'searching_msg' in locals():
                     await searching_msg.delete()
@@ -1149,42 +1138,70 @@ class Music(commands.Cog):
 
         vc = ctx.voice_client
         if vc.is_playing() or vc.is_paused() or st.is_loading:
-            if len(results) > 1:
-                st.queue.append(info) # The loop above skipped the first one for st.queue if it was the only one
-                await ctx.send(f"\U0001f4cb Added **{len(results)}** tracks to the queue.")
+            st.queue.append(info)
+            if playlist_tracks:
+                await ctx.send(added_msg)
             else:
-                st.queue.append(info)
                 pos = len(st.queue)
                 await ctx.send(f"\U0001f4cb Added to queue (#{pos}): **{info.get('title')}**")
             self._schedule_prefetch(ctx)
         else:
-            if len(results) > 1:
-                await ctx.send(f"\U0001f4cb Added **{len(results)}** tracks to the queue.")
+            if playlist_tracks:
+                await ctx.send(added_msg)
             await self._play_track(ctx, info, ensure_voice=False)
 
     @commands.command()
-    async def skip(self, ctx):
-        """Skip the current song."""
+    async def skip(self, ctx, count: int = 1):
+        """Skip the current song or multiple songs."""
         st = self.state(ctx.guild.id)
         if not ctx.voice_client:
             return await ctx.send("\u274c Not connected to voice.")
 
-        if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
+        if count < 1:
+            return await ctx.send("\u274c Skip count must be at least 1.")
+
+        if ctx.voice_client.is_playing() or ctx.voice_client.is_paused() or st.is_loading:
+            # If skipping more than 1, remove the extras from the queue first
+            if count > 1:
+                skipped_from_queue = 0
+                for _ in range(count - 1):
+                    if st.queue:
+                        st.queue.popleft()
+                        skipped_from_queue += 1
+                
+                # If we were loading, stop loading the current one as well
+                if st.is_loading:
+                    st.is_loading = False
+                
+                await ctx.send(f"\u23ed\ufe0f Skipped **{skipped_from_queue + 1}** tracks.")
+            else:
+                await ctx.send("\u23ed\ufe0f Skipped.")
+
+            # Stop current playback (this triggers _advance via the 'after' callback)
             original_loop = st.loop_mode
             if st.loop_mode == "song":
                 st.loop_mode = "off"
-            ctx.voice_client.stop()
-            await ctx.send("\u23ed\ufe0f Skipped.")
+            
+            if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
+                ctx.voice_client.stop()
+            else:
+                # If it was just loading, we manually advance
+                self._advance(ctx.guild.id)
+
             if original_loop == "song":
                 await asyncio.sleep(0.5)
                 st.loop_mode = "song"
-        elif st.is_loading:
-            await ctx.send("\u23f3 Currently loading the next song... please wait.")
         elif st.queue:
+            # Handle case where nothing is playing but there's a queue
+            skipped = 0
+            for _ in range(count):
+                if st.queue:
+                    st.queue.popleft()
+                    skipped += 1
+            await ctx.send(f"\u23ed\ufe0f Skipped **{skipped}** tracks from queue.")
             self._advance(ctx.guild.id)
-            await ctx.send("\u23ed\ufe0f Skipped (manual advance).")
         else:
-            await ctx.send("\u274c Nothing is playing.")
+            await ctx.send("\u274c Nothing is playing and the queue is empty.")
 
     @commands.command()
     async def loop(self, ctx, mode: str = None):
@@ -1211,6 +1228,16 @@ class Music(commands.Cog):
         random.shuffle(temp_list)
         st.queue = deque(temp_list)
         await ctx.send("\U0001f500 Queue shuffled.")
+
+    @commands.command(aliases=['cl'])
+    async def clear(self, ctx):
+        """Clear the entire queue."""
+        st = self.state(ctx.guild.id)
+        st.queue.clear()
+        if st.prefetch_task and not st.prefetch_task.done():
+            st.prefetch_task.cancel()
+            st.prefetch_task = None
+        await ctx.send("\U0001f5d1\ufe0f Queue cleared.")
 
     @commands.command(aliases=['rm'])
     async def remove(self, ctx, index: int):
