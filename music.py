@@ -56,17 +56,19 @@ async def _extract_spotify_metadata(url: str) -> list[str] | str | None:
                 # Check if it's a playlist or album
                 is_collection = "/playlist/" in embed_url or "/album/" in embed_url
                 
-                if is_collection:
-                    # Look for track names in h3 and artists in h4 in the embed page
-                    tracks = []
-                    # Find all h3 (titles) and h4 (artists)
+                # 1. Try JSON-like track data (works for both tracks and collections)
+                # Pattern: "name":"Song Name","artists":[{"name":"Artist Name"}]
+                tracks = []
+                track_matches = re.findall(r'\"name\":\"([^"]+)\",\"artists\":\[\{\"name\":\"([^"]+)\"', html)
+                for t_name, a_name in track_matches:
+                    query = f"{html_lib.unescape(t_name)} {html_lib.unescape(a_name)}"
+                    if query not in tracks:
+                        tracks.append(query)
+                
+                # 2. Try HTML tags (backup)
+                if not tracks:
                     titles = re.findall(r'<h3[^>]*>([^<]+)</h3>', html)
-                    # More robust artist regex to handle various tag combinations
                     artists_raw = re.findall(r'<h4[^>]*>(?:<span[^>]*>.*?</span>\s*)?([^<]+)</h4>', html)
-                    
-                    logger.debug("Spotify scraping: found %d titles and %d artists", len(titles), len(artists_raw))
-                    
-                    # Clean up entities like &amp;
                     for title, artist in zip(titles, artists_raw):
                         t = html_lib.unescape(title).strip()
                         a = html_lib.unescape(artist).strip()
@@ -74,23 +76,16 @@ async def _extract_spotify_metadata(url: str) -> list[str] | str | None:
                             query = f"{t} {a}"
                             if query not in tracks:
                                 tracks.append(query)
-                    
-                    if not tracks:
-                        # Try searching for JSON-like track data if HTML tags failed
-                        track_matches = re.findall(r'\"name\":\"([^"]+)\",\"artists\":\[\{\"name\":\"([^"]+)\"', html)
-                        for t_name, a_name in track_matches:
-                            query = f"{html_lib.unescape(t_name)} {html_lib.unescape(a_name)}"
-                            if query not in tracks:
-                                tracks.append(query)
 
-                    if tracks:
+                if tracks:
+                    if is_collection:
                         logger.info("Extracted %d tracks from Spotify collection: %s", len(tracks), url)
                         return tracks
                     else:
-                        logger.warning("Spotify collection detected but no tracks found in HTML: %s", embed_url)
+                        # For single tracks, the first match is the track itself
+                        return tracks[0]
                 
-                # Fallback to metadata in the HTML for single tracks or if embed scraping failed
-                # Try og:title (usually "Song Name")
+                # 3. Fallback to Open Graph metadata
                 title = None
                 title_match = re.search(r'<meta\s+property="og:title"\s+content="([^"]+)"', html)
                 if not title_match:
@@ -107,12 +102,10 @@ async def _extract_spotify_metadata(url: str) -> list[str] | str | None:
                         artist = desc.split(" · ")[0]
                 
                 if title and artist:
-                    # Avoid generic titles
                     if title.lower() in ("spotify", "playlist", "album"):
                         return artist
                     return f"{title} {artist}"
                 
-                # Final safeguard: if title is just "Spotify", return None to signal failure
                 if title and title.lower() in ("spotify", "playlist", "album"):
                     return None
                     
@@ -322,7 +315,7 @@ async def search_and_download(query: str, *, refresh: bool = False, download: bo
         elif metadata:
             query = metadata
         else:
-            logger.warning("Could not extract metadata from Spotify URL, attempting direct extraction: %s", query)
+            raise Exception("Could not extract song info from this Spotify link. Please try searching for the song name instead.")
 
     normalized = _normalize_query(query)
 
