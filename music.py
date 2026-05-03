@@ -10,6 +10,8 @@ import glob
 import time
 import gc
 import logging
+import re
+import aiohttp
 from concurrent.futures import ThreadPoolExecutor
 from collections import deque
 
@@ -18,6 +20,50 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 logger = logging.getLogger("discordbot.music")
 AUTO_DISCONNECT_WHEN_EMPTY = os.getenv("AUTO_DISCONNECT_WHEN_EMPTY", "true").strip().lower() in ("1", "true", "yes", "on")
 AUTO_DISCONNECT_EMPTY_DELAY = int(os.getenv("AUTO_DISCONNECT_EMPTY_DELAY", "60"))
+
+# ── Spotify Metadata Extraction ──────────────────────────────────────────────
+
+async def _extract_spotify_metadata(url: str) -> str | None:
+    """Extract song title and artist from a Spotify URL using simple HTML scraping."""
+    try:
+        # Using a standard browser User-Agent to avoid being blocked
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        }
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(url, timeout=10) as response:
+                if response.status != 200:
+                    logger.warning("Spotify metadata request failed with status %d", response.status)
+                    return None
+                html = await response.text()
+                
+                # Try og:title (usually "Song Name")
+                title = None
+                title_match = re.search(r'<meta\s+property="og:title"\s+content="([^"]+)"', html)
+                if not title_match:
+                    title_match = re.search(r'<title>([^<]+)</title>', html)
+                
+                if title_match:
+                    title = title_match.group(1).replace(" | Spotify", "").strip()
+                
+                # Try og:description (usually "Artist Name · Song · Year")
+                artist = None
+                desc_match = re.search(r'<meta\s+property="og:description"\s+content="([^"]+)"', html)
+                if desc_match:
+                    desc = desc_match.group(1)
+                    if " · " in desc:
+                        # Take the first part which is typically the artist
+                        artist = desc.split(" · ")[0]
+                
+                if title and artist:
+                    # Filter out generic titles
+                    if "Spotify" in title and artist:
+                         return artist
+                    return f"{title} {artist}"
+                return title
+    except Exception as e:
+        logger.warning("Failed to extract Spotify metadata from %s: %s", url, e)
+        return None
 
 # ── yt-dlp options ─────────────────────────────────────────────────────────────
 
@@ -207,11 +253,26 @@ async def search_and_download(query: str, *, refresh: bool = False, download: bo
 
     Returns (info_dict, audio_path_or_url).
     """
+    # 0. Handle Spotify URLs by converting them to YouTube search queries
+    original_query = query
+    is_spotify = "open.spotify.com" in query
+    if is_spotify:
+        metadata = await _extract_spotify_metadata(query)
+        if metadata:
+            logger.info("Converted Spotify URL to search query: %s -> %s", query, metadata)
+            query = metadata
+        else:
+            logger.warning("Could not extract metadata from Spotify URL, attempting direct extraction: %s", query)
+
     normalized = _normalize_query(query)
 
     # 1. Check cache — if we already have info + file on disk, return immediately
     if not refresh:
-        cached = await _read_cached_info([normalized] if normalized else [])
+        cache_lookup = [normalized] if normalized else []
+        if is_spotify:
+            cache_lookup.append(_normalize_query(original_query))
+        
+        cached = await _read_cached_info(cache_lookup)
         if cached and cached.get('id'):
             existing_path = get_audio_path(cached['id'])
             if existing_path:
@@ -243,8 +304,14 @@ async def search_and_download(query: str, *, refresh: bool = False, download: bo
             if query.startswith(('http://', 'https://')):
                 opts['default_search'] = 'auto'
             
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(query, download=download)
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(query, download=download)
+            except yt_dlp.utils.DownloadError as e:
+                err_msg = str(e)
+                if "[DRM]" in err_msg or "DRM protected" in err_msg:
+                    raise Exception("This content is DRM protected and cannot be played directly. Try searching for the song name instead.") from e
+                raise
 
             if info and 'entries' in info:
                 if not info['entries']:
@@ -267,7 +334,7 @@ async def search_and_download(query: str, *, refresh: bool = False, download: bo
             info, result_path = await loop.run_in_executor(_ydl_executor, _do_extract)
 
         if download:
-            await _store_cached_info(info, query)
+            await _store_cached_info(info, query, original_query if is_spotify else None)
         
         future.set_result((_clone_info(info), result_path))
         return info, result_path
