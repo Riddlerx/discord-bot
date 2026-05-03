@@ -23,10 +23,11 @@ AUTO_DISCONNECT_EMPTY_DELAY = int(os.getenv("AUTO_DISCONNECT_EMPTY_DELAY", "60")
 
 # ── Spotify Metadata Extraction ──────────────────────────────────────────────
 
-async def _extract_spotify_metadata(url: str) -> str | None:
-    """Extract song title and artist from a Spotify URL using simple HTML scraping."""
+async def _extract_spotify_metadata(url: str) -> list[str] | str | None:
+    """Extract song title and artist from a Spotify URL using simple HTML scraping.
+    Returns a list of queries if it's a playlist/album, or a single query string for a track.
+    """
     try:
-        # Using a standard browser User-Agent to avoid being blocked
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         }
@@ -37,7 +38,25 @@ async def _extract_spotify_metadata(url: str) -> str | None:
                     return None
                 html = await response.text()
                 
-                # Try og:title (usually "Song Name")
+                # Check if it's a playlist or album
+                is_collection = "/playlist/" in url or "/album/" in url
+                
+                if is_collection:
+                    # Spotify Embed or Web Player often has track names in the HTML for SEO
+                    # This is a bit brittle but avoids needing an API key for basic usage
+                    tracks = []
+                    # Pattern for track names in various Spotify metadata structures
+                    track_matches = re.findall(r'\"name\":\"([^"]+)\",\"artists\":\[\{\"name\":\"([^"]+)\"', html)
+                    for track_name, artist_name in track_matches:
+                        query = f"{track_name} {artist_name}"
+                        if query not in tracks:
+                            tracks.append(query)
+                    
+                    if tracks:
+                        logger.info("Extracted %d tracks from Spotify collection: %s", len(tracks), url)
+                        return tracks
+                
+                # Fallback to single track extraction (existing logic)
                 title = None
                 title_match = re.search(r'<meta\s+property="og:title"\s+content="([^"]+)"', html)
                 if not title_match:
@@ -46,17 +65,14 @@ async def _extract_spotify_metadata(url: str) -> str | None:
                 if title_match:
                     title = title_match.group(1).replace(" | Spotify", "").strip()
                 
-                # Try og:description (usually "Artist Name · Song · Year")
                 artist = None
                 desc_match = re.search(r'<meta\s+property="og:description"\s+content="([^"]+)"', html)
                 if desc_match:
                     desc = desc_match.group(1)
                     if " · " in desc:
-                        # Take the first part which is typically the artist
                         artist = desc.split(" · ")[0]
                 
                 if title and artist:
-                    # Filter out generic titles
                     if "Spotify" in title and artist:
                          return artist
                     return f"{title} {artist}"
@@ -248,16 +264,34 @@ def cleanup_all():
 
 # ── Core: single-call search + download ───────────────────────────────────────
 
-async def search_and_download(query: str, *, refresh: bool = False, download: bool = True) -> tuple[dict, str]:
+async def search_and_download(query: str, *, refresh: bool = False, download: bool = True) -> tuple[dict, str] | list[tuple[dict, str]]:
     """Search YouTube, extract info, and optionally download audio.
 
-    Returns (info_dict, audio_path_or_url).
+    Returns (info_dict, audio_path_or_url) or a list of them if multiple tracks were found (e.g. Spotify playlist).
     """
     # 0. Handle Spotify URLs by converting them to YouTube search queries
     original_query = query
     is_spotify = "open.spotify.com" in query
     if is_spotify:
         metadata = await _extract_spotify_metadata(query)
+        if isinstance(metadata, list):
+            logger.info("Spotify playlist/album detected with %d tracks", len(metadata))
+            # For playlists, we process each track. To keep it simple and responsive,
+            # we'll return a list of queries to be handled by the caller.
+            # However, search_and_download usually returns (info, path).
+            # We'll adapt it to return a list of results.
+            results = []
+            # Only process first 50 tracks to avoid hanging
+            for track_query in metadata[:50]:
+                try:
+                    # Recursive call for each track (as a simple search query)
+                    res = await search_and_download(track_query, refresh=refresh, download=download)
+                    if isinstance(res, tuple):
+                        results.append(res)
+                except Exception as e:
+                    logger.warning("Failed to process Spotify playlist track %r: %s", track_query, e)
+            return results
+        
         if metadata:
             logger.info("Converted Spotify URL to search query: %s -> %s", query, metadata)
             query = metadata
@@ -1040,35 +1074,58 @@ class Music(commands.Cog):
                 logger.info("Voice prepare guild=%s took %.2fs", ctx.guild.id, time.perf_counter() - s_start)
 
                 s_dl = time.perf_counter()
-                # Use download=True to ensure local file is available (prevents 403 Forbidden errors)
-                info, audio_path = await search_and_download(query, download=True)
+                # Use download=True to ensure local file is available
+                results = await search_and_download(query, download=True)
                 elapsed = time.perf_counter() - s_dl
-                logger.info(
-                    "Search+download guild=%s query=%r took %.2fs path=%s",
-                    ctx.guild.id,
-                    query,
-                    elapsed,
-                    audio_path,
-                )
+                logger.info("Search+download guild=%s took %.2fs", ctx.guild.id, elapsed)
 
-                info['original_url'] = query
-                info['_audio_path'] = audio_path
+                if not isinstance(results, list):
+                    results = [results]
+                
+                if not results:
+                    raise Exception("No results found.")
+
+                # Process all results
+                first_info = None
+                added_count = 0
+                for info, audio_path in results:
+                    info['original_url'] = query
+                    info['_audio_path'] = audio_path
+                    
+                    if not first_info:
+                        first_info = info
+                    
+                    if added_count > 0:
+                         st.queue.append(info)
+                    added_count += 1
+                
+                info = first_info # For the initial play logic
+                
             except Exception as e:
-                await searching_msg.delete()
+                if 'searching_msg' in locals():
+                    await searching_msg.delete()
                 logger.exception("Error loading track guild=%s query=%r: %s", ctx.guild.id, query, e)
                 return await ctx.send(f"\u274c Could not load track: {e}")
 
-        await searching_msg.delete()
+        if 'searching_msg' in locals():
+            await searching_msg.delete()
+            
         if not voice_ok:
             return
 
         vc = ctx.voice_client
         if vc.is_playing() or vc.is_paused() or st.is_loading:
-            st.queue.append(info)
+            if len(results) > 1:
+                st.queue.append(info) # The loop above skipped the first one for st.queue if it was the only one
+                await ctx.send(f"\U0001f4cb Added **{len(results)}** tracks to the queue.")
+            else:
+                st.queue.append(info)
+                pos = len(st.queue)
+                await ctx.send(f"\U0001f4cb Added to queue (#{pos}): **{info.get('title')}**")
             self._schedule_prefetch(ctx)
-            pos = len(st.queue)
-            await ctx.send(f"\U0001f4cb Added to queue (#{pos}): **{info.get('title')}**")
         else:
+            if len(results) > 1:
+                await ctx.send(f"\U0001f4cb Added **{len(results)}** tracks to the queue.")
             await self._play_track(ctx, info, ensure_voice=False)
 
     @commands.command()
