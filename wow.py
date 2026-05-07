@@ -563,17 +563,23 @@ class WoW(commands.Cog):
         """Lookup a WoW character: name-realm or name."""
         async with ctx.typing():
             name, realm = query, "frostmourne"
-            if "-" in query:
+            if ":" in query:
+                parts = query.rsplit(":", 1)
+                name, realm = parts[0].strip(), parts[1].strip()
+            elif "-" in query:
                 parts = query.rsplit("-", 1)
-                name, realm = parts[0].strip(), parts[1].strip().lower().replace(" ", "").replace("'", "")
+                name, realm = parts[0].strip(), parts[1].strip()
+
+            # Slugify realm: "Area 52" -> "area-52"
+            realm_slug = realm.lower().replace(" ", "-").replace("'", "")
 
             async with aiohttp.ClientSession() as session:
-                profile = await self.get_character_profile(session, name, realm)
+                profile = await self.get_character_profile(session, name, realm_slug)
                 if not profile:
-                    return await ctx.send(f"❌ Character **{name}** on **{realm}** not found.")
+                    return await ctx.send(f"❌ Character **{name}** on **{realm_slug}** not found.")
 
-                keys, raid, score = await self.get_vault_data(session, name, realm)
-                media_url = await self.get_character_media(session, name, realm)
+                keys, raid, score = await self.get_vault_data(session, name, realm_slug)
+                media_url = await self.get_character_media(session, name, realm_slug)
 
                 char_class = profile.get("character_class", {}).get("name", "Unknown")
                 race = profile.get("race", {}).get("name", "Unknown")
@@ -590,7 +596,7 @@ class WoW(commands.Cog):
                     title=f"{profile['name']} - {profile['realm']['name']}",
                     description=f"{level} {race} {char_class} | <{guild}>",
                     color=color,
-                    url=f"https://raider.io/characters/us/{realm}/{urllib.parse.quote(name)}"
+                    url=f"https://raider.io/characters/us/{realm_slug}/{urllib.parse.quote(name)}"
                 )
 
                 if media_url:
@@ -607,7 +613,7 @@ class WoW(commands.Cog):
             item_name, realm = search, None
             if ":" in search:
                 parts = search.rsplit(":", 1)
-                potential_realm = parts[1].strip().lower().replace(" ", "").replace("'", "")
+                potential_realm = parts[1].strip().lower().replace(" ", "").replace("-", "").replace("'", "")
                 if potential_realm in REALMS:
                     item_name, realm = parts[0].strip(), parts[1].strip()
             if not realm: realm = "frostmourne"
@@ -647,7 +653,7 @@ class WoW(commands.Cog):
                 commodities = await self.get_commodities_cached(session)
                 realm_data = None
                 if realm:
-                    realm_key = realm.lower().replace(" ", "").replace("'", "")
+                    realm_key = realm.lower().replace(" ", "").replace("-", "").replace("'", "")
                     realm_id = REALMS.get(realm_key)
                     if realm_id:
                         token = await self.get_access_token(session)
