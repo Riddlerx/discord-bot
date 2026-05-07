@@ -529,6 +529,78 @@ class WoW(commands.Cog):
                 logger.error(f"Error in guildvault command: {e}")
                 await ctx.send(f"⚠️ An error occurred: {e}")
 
+    async def get_character_profile(self, session: aiohttp.ClientSession, name: str, realm: str) -> Optional[Dict]:
+        token = await self.get_access_token(session)
+        if not token: return None
+
+        url = f"https://us.api.blizzard.com/profile/wow/character/{realm}/{urllib.parse.quote(name.lower())}"
+        headers = {"Authorization": f"Bearer {token}"}
+        params = {"namespace": "profile-us", "locale": "en_US"}
+        
+        return await self.safe_get(session, url, headers=headers, params=params)
+
+    async def get_character_media(self, session: aiohttp.ClientSession, name: str, realm: str) -> Optional[str]:
+        token = await self.get_access_token(session)
+        if not token: return None
+
+        url = f"https://us.api.blizzard.com/profile/wow/character/{realm}/{urllib.parse.quote(name.lower())}/character-media"
+        headers = {"Authorization": f"Bearer {token}"}
+        params = {"namespace": "profile-us", "locale": "en_US"}
+        
+        data = await self.safe_get(session, url, headers=headers, params=params)
+        if data and data.get("assets"):
+            for asset in data["assets"]:
+                if asset.get("key") == "main-raw":
+                    return asset.get("value")
+                if asset.get("key") == "avatar":
+                    avatar = asset.get("value")
+            # Prefer avatar for small embed if main-raw not found
+            return avatar if 'avatar' in locals() else None
+        return None
+
+    @commands.command(aliases=['char', 'whois'])
+    async def lookup(self, ctx, *, query: str):
+        """Lookup a WoW character: name-realm or name."""
+        async with ctx.typing():
+            name, realm = query, "frostmourne"
+            if "-" in query:
+                parts = query.rsplit("-", 1)
+                name, realm = parts[0].strip(), parts[1].strip().lower().replace(" ", "").replace("'", "")
+
+            async with aiohttp.ClientSession() as session:
+                profile = await self.get_character_profile(session, name, realm)
+                if not profile:
+                    return await ctx.send(f"❌ Character **{name}** on **{realm}** not found.")
+
+                keys, raid, score = await self.get_vault_data(session, name, realm)
+                media_url = await self.get_character_media(session, name, realm)
+
+                char_class = profile.get("character_class", {}).get("name", "Unknown")
+                race = profile.get("race", {}).get("name", "Unknown")
+                level = profile.get("level", 0)
+                ilvl = profile.get("equipped_item_level", 0)
+                guild = profile.get("guild", {}).get("name", "No Guild")
+                faction = profile.get("faction", {}).get("name", "Neutral")
+
+                color = discord.Color.blue()
+                if faction == "Horde": color = discord.Color.red()
+                elif faction == "Alliance": color = discord.Color.blue()
+
+                embed = discord.Embed(
+                    title=f"{profile['name']} - {profile['realm']['name']}",
+                    description=f"{level} {race} {char_class} | <{guild}>",
+                    color=color,
+                    url=f"https://raider.io/characters/us/{realm}/{urllib.parse.quote(name)}"
+                )
+
+                if media_url:
+                    embed.set_thumbnail(url=media_url)
+
+                embed.add_field(name="Stats", value=f"**ilvl:** {ilvl}\n**M+ Score:** {score}", inline=True)
+                embed.add_field(name="Weekly Vault", value=f"**Keys:** {keys[0]}/{keys[1]}/{keys[2]}\n**Raid:** {'/'.join(raid)}", inline=True)
+                
+                await ctx.send(embed=embed)
+
     @commands.command()
     async def price(self, ctx, *, search: str):
         async with ctx.typing():

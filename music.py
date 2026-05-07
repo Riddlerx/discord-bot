@@ -428,6 +428,63 @@ def _parse_cookies_for_ffmpeg(cookiefile: str) -> str:
         return ""
 
 
+# ── Views ───────────────────────────────────────────────────────────────────
+
+class MusicControlView(discord.ui.View):
+    def __init__(self, bot, guild_id):
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.guild_id = guild_id
+
+    def get_music_cog(self):
+        return self.bot.get_cog("Music")
+
+    @discord.ui.button(emoji="⏯️", style=discord.ButtonStyle.primary)
+    async def play_pause_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = interaction.guild.voice_client
+        if not vc:
+            return await interaction.response.send_message("❌ Not connected to voice.", ephemeral=True)
+        
+        if vc.is_playing():
+            vc.pause()
+            await interaction.response.send_message("⏸️ Paused.", ephemeral=True)
+        elif vc.is_paused():
+            vc.resume()
+            await interaction.response.send_message("▶️ Resumed.", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ Nothing is playing.", ephemeral=True)
+
+    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary)
+    async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = interaction.guild.voice_client
+        if vc and (vc.is_playing() or vc.is_paused()):
+            vc.stop()
+            await interaction.response.send_message("⏭️ Skipped.", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ Nothing to skip.", ephemeral=True)
+
+    @discord.ui.button(emoji="🔀", style=discord.ButtonStyle.secondary)
+    async def shuffle_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        st = self.get_music_cog().state(self.guild_id)
+        if len(st.queue) < 2:
+            return await interaction.response.send_message("❌ Not enough songs to shuffle.", ephemeral=True)
+        
+        temp_list = list(st.queue)
+        random.shuffle(temp_list)
+        st.queue = deque(temp_list)
+        await interaction.response.send_message("🔀 Shuffled.", ephemeral=True)
+
+    @discord.ui.button(emoji="🔁", style=discord.ButtonStyle.secondary)
+    async def loop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        st = self.get_music_cog().state(self.guild_id)
+        valid_modes = ["off", "song", "queue"]
+        idx = (valid_modes.index(st.loop_mode) + 1) % len(valid_modes)
+        st.loop_mode = valid_modes[idx]
+        
+        emoji = {"off": "➡️", "song": "🔂", "queue": "🔁"}
+        await interaction.response.send_message(f"{emoji[st.loop_mode]} Loop: **{st.loop_mode}**", ephemeral=True)
+
+
 # ── Per-guild state ────────────────────────────────────────────────────────────
 
 class GuildState:
@@ -584,8 +641,9 @@ class Music(commands.Cog):
             logger.exception("Voice connection failed guild=%s channel=%s: %s", guild.id, voice_channel, exc)
             return False
 
-    def _create_audio_source(self, audio_path: str, volume: float, *, seek_seconds: int = 0):
+    def _create_audio_source(self, guild_id: int, audio_path: str, volume: float, *, seek_seconds: int = 0):
         # Optimized for local files and streaming (more stable on AWS)
+        st = self.state(guild_id)
         is_url = audio_path.startswith("http")
         
         # Base FFmpeg options as a list to avoid shell quoting issues
@@ -620,8 +678,7 @@ class Music(commands.Cog):
         if seek_seconds > 0:
             before_options.extend(["-ss", str(seek_seconds)])
 
-        volume_filter = f"volume={volume}"
-        ffmpeg_options = f"-vn -loglevel warning -af {volume_filter}"
+        ffmpeg_options = f"-vn -loglevel warning -af volume={volume}"
 
         logger.debug("Creating audio source path=%s before_options=%r", audio_path, before_options)
 
@@ -665,7 +722,7 @@ class Music(commands.Cog):
         if not vc or not vc.is_connected():
             raise RuntimeError("Voice client is not connected.")
 
-        source = self._create_audio_source(audio_path, st.volume, seek_seconds=seek_seconds)
+        source = self._create_audio_source(guild.id, audio_path, st.volume, seek_seconds=seek_seconds)
         title = info.get("title", "Unknown")
 
         st.current_info = info
@@ -674,8 +731,11 @@ class Music(commands.Cog):
         st.is_loading = False
         st.playback_started_at = time.monotonic() - max(seek_seconds, 0)
 
+        # Include view for interactive controls
+        view = MusicControlView(self.bot, guild.id)
+        
         if announce_channel and announce_text:
-            await announce_channel.send(announce_text)
+            await announce_channel.send(announce_text, view=view)
 
         logger.info(
             "Starting playback guild=%s track=%s path=%s seek=%ss volume=%.2f",
