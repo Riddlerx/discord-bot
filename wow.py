@@ -415,39 +415,32 @@ class WoW(commands.Cog):
                         return final_results
         return []
 
-    def get_class_info(self, class_id: int) -> tuple:
-        """Get class name, color, and fallback emoji."""
-        classes = {
-            1: ("warrior", 0xC79C6E, "🛡️"),
-            2: ("paladin", 0xF58CBA, "🔨"),
-            3: ("hunter", 0xABD473, "🏹"),
-            4: ("rogue", 0xFFF569, "🗡️"),
-            5: ("priest", 0xFFFFFF, "✨"),
-            6: ("deathknight", 0xC41F3B, "❄️"),
-            7: ("shaman", 0x0070DE, "🌀"),
-            8: ("mage", 0x3FC7EB, "🔮"),
-            9: ("warlock", 0x8787ED, "💀"),
-            10: ("monk", 0x00FF96, "🤜"),
-            11: ("druid", 0xFF7D0A, "🍃"),
-            12: ("demonhunter", 0xA330C9, "🦇"),
-            13: ("evoker", 0x33937F, "🐲"),
-        }
-        return classes.get(class_id, ("unknown", 0xCCCCCC, "👤"))
-
     def get_class_emoji(self, class_id: int) -> str:
-        """Try to find a custom emoji in the bot's cache, else fallback."""
-        name, _, fallback = self.get_class_info(class_id)
-        # Search for emoji names like 'warrior' or 'wow_warrior'
+        """Try to find a custom emoji in the bot's cache (wowwarrior, wowpaladin, etc.)."""
+        classes = {
+            1: "warrior", 2: "paladin", 3: "hunter", 4: "rogue", 5: "priest", 
+            6: "deathknight", 7: "shaman", 8: "mage", 9: "warlock", 10: "monk", 
+            11: "druid", 12: "demonhunter", 13: "evoker"
+        }
+        name = classes.get(class_id, "unknown")
+        # Search for 'wowwarrior', 'wowpaladin', etc.
+        target = f"wow{name}"
         for emoji in self.bot.emojis:
-            if emoji.name.lower() == name or emoji.name.lower() == f"wow_{name}":
+            if emoji.name.lower() == target:
                 return str(emoji)
-        return fallback
+        
+        # Fallback to standard emojis if custom not found
+        fallbacks = {
+            1: "🛡️", 2: "🔨", 3: "🏹", 4: "🗡️", 5: "✨", 
+            6: "❄️", 7: "🌀", 8: "🔮", 9: "💀", 10: "🤜", 
+            11: "🍃", 12: "🦇", 13: "🐲"
+        }
+        return fallbacks.get(class_id, "👤")
 
-    async def build_guild_vault_embed(self, session: aiohttp.ClientSession) -> discord.Embed:
+    async def build_guild_vault_text(self, session: aiohttp.ClientSession) -> str:
         realm, guild_name = "frostmourne", "sinful-garden"
         guild = await self.get_guild_roster(session, realm, guild_name)
-        if not guild:
-            return discord.Embed(title="⚠️ Error", description="Error fetching guild roster.", color=discord.Color.red())
+        if not guild: return "⚠️ Error fetching guild roster."
 
         semaphore = asyncio.Semaphore(2)
         async def sem_fetch(char):
@@ -461,39 +454,33 @@ class WoW(commands.Cog):
         rows = [r for r in results if r is not None]
         rows.sort(key=lambda x: (sum(x[1]), x[3]), reverse=True)
 
-        # Use the #1 player's class color for the embed
-        top_class_id = rows[0][4] if rows else 1
-        _, embed_color, _ = self.get_class_info(top_class_id)
+        max_name_len = max((len(name) for name, _, _, _, _ in rows[:25]), default=10)
+        max_name_len = min(max_name_len, 20)
 
-        embed = discord.Embed(
-            title="🔥 WEEKLY VAULT LEADERBOARD 🔥",
-            color=embed_color,
-            timestamp=discord.utils.utcnow()
-        )
-
-        lines = []
-        # Table-like header using bolding
-        lines.append("` #  ` **Player** (Keys / Raid / Score)")
-        lines.append("─" * 30)
+        # Header
+        lines = ["🔥 **WEEKLY VAULT LEADERBOARD** 🔥"]
+        header = f"| {'Name':<{max_name_len + 3}} | Key Vault | Raid Vault | Score |"
+        lines.append(f"👤 `{header}`")
+        separator = f"|{'-'*(max_name_len+5)}+-----------+-----------+--------|"
+        lines.append(f"⠀ `{separator}`")
 
         for i, (name, keys, raid, score, class_id) in enumerate(rows[:25], start=1):
             emoji = self.get_class_emoji(class_id)
             key_str = f"{keys[0]}/{keys[1]}/{keys[2]}"
             raid_str = "/".join(raid)
-            
-            # Format: #1 [Icon] Name - 18/17/10 | H/N/- | 3500
-            line = f"`#{i:<2}` {emoji} **{name}**\n╰─ `{key_str}` • `{raid_str}` • `{score}`"
-            lines.append(line)
+            # Table row without the emoji (so it stays aligned)
+            row = f"| #{i:<2} {name:<{max_name_len}} | {key_str:^9} | {raid_str:^9} | {score:>5} |"
+            lines.append(f"{emoji} `{row}`")
 
-        embed.description = "\n".join(lines)
+        lines.append(f"⠀ `{separator}`")
         
         token_price = await self.get_wow_token_price(session)
-        footer_text = "Updates every 30 mins"
         if token_price > 0:
-            footer_text += f" • 💰 Token: {token_price:,.0f}g"
+            lines.append(f"💰 **WoW Token Price:** {token_price:,.0f}g")
         
-        embed.set_footer(text=footer_text)
-        return embed
+        unix_now = int(time.time())
+        lines.append(f"Last Updated: <t:{unix_now}:R>")
+        return "\n".join(lines)
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -518,12 +505,12 @@ class WoW(commands.Cog):
                         self.guild_vault_message_id = None
                         continue
                     
-                    new_embed = await self.build_guild_vault_embed(session)
-                    # We don't easily compare embeds, so we update every cycle or track last_content
-                    # For simplicity in this personal bot, we'll just edit it.
-                    await message.edit(content=None, embed=new_embed)
-                    self.save_state()
-                    logger.info("Updated leaderboard embed message_id=%s", self.guild_vault_message_id)
+                    new_content = await self.build_guild_vault_text(session)
+                    if new_content != self.last_content:
+                        await message.edit(content=new_content, embed=None)
+                        self.last_content = new_content
+                        self.save_state()
+                        logger.info("Updated leaderboard text message_id=%s", self.guild_vault_message_id)
                 except Exception as e:
                     logger.exception("Leaderboard update error: %s", e)
                 await asyncio.sleep(1800)
@@ -533,9 +520,10 @@ class WoW(commands.Cog):
         async with ctx.typing():
             try:
                 async with aiohttp.ClientSession() as session:
-                    embed = await self.build_guild_vault_embed(session)
-                    message = await ctx.send(embed=embed)
+                    content = await self.build_guild_vault_text(session)
+                    message = await ctx.send(content)
                     self.guild_vault_message_id = message.id
+                    self.last_content = content
                     self.save_state()
             except Exception as e:
                 logger.error(f"Error in guildvault command: {e}")
